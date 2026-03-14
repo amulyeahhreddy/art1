@@ -45,6 +45,10 @@ def main():
     mudra_recognizer = MudraRecognizer()
     visual_effects = VisualEffects()
     
+    # Debug mode and freeze frame state
+    debug_mode = False
+    freeze_frame = False
+    
     # FPS calculation
     fps_counter = 0
     fps_start_time = time.time()
@@ -85,41 +89,76 @@ def main():
         frame = hand_tracker.draw_landmarks(frame, results)
         
         # Recognize mudras for each detected hand with proper handedness
-        for i, landmarks in enumerate(hand_landmarks_list):
-            # Get hand label (Left/Right) from MediaPipe handedness
-            hand_label = handedness_list[i] if i < len(handedness_list) else f"Hand {i+1}"
+        hand_data = []
+        if results.multi_hand_landmarks:
+            for i, hand_lm in enumerate(results.multi_hand_landmarks):
+                lm_list = [(lm.x, lm.y, lm.z) for lm in hand_lm.landmark]
+                handedness = results.multi_handedness[i].classification[0].label
+                hand_data.append((lm_list, handedness))
+
+        debug_info = None
+        if len(hand_data) == 0:
+            mudra, score = "Unknown", 0.0
+        elif len(hand_data) == 1:
+            if debug_mode:
+                mudra, score, debug_info = mudra_recognizer.recognize_single(
+                    hand_data[0][0], hand_data[0][1], debug=True)
+            else:
+                mudra, score = mudra_recognizer.recognize_single(
+                    hand_data[0][0], hand_data[0][1])
+        else:  # 2 hands
+            mudra, score = mudra_recognizer.recognize_two_hand(hand_data[0], hand_data[1])
             
-            # Recognize mudra with hand type for temporal smoothing
-            mudra = mudra_recognizer.recognize_mudra(landmarks, hand_label)
-            
-            # Display mudra name on frame
-            text = f"{hand_label}: {mudra}"
-            
-            # Calculate text position (above the wrist)
-            wrist_x = int(landmarks[0][0] * frame.shape[1])
-            wrist_y = int(landmarks[0][1] * frame.shape[0])
-            
-            # Draw background rectangle for better visibility
-            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-            cv2.rectangle(frame, 
-                         (wrist_x - 10, wrist_y - 40),
-                         (wrist_x + text_size[0] + 10, wrist_y - 10),
-                         (0, 0, 0), -1)
-            
-            # Draw text with color coding (green for known, red for unknown)
-            text_color = (0, 255, 0) if mudra != "Unknown" else (0, 0, 255)
-            cv2.putText(frame, text, (wrist_x, wrist_y - 15),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2)
+            # Display mudra name and confidence
+            if mudra != "Unknown":
+                label = f"{mudra}  {int(score*100)}%"
+                cv2.putText(frame, label, (20, 60),
+                            cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,255,180), 2)
+            else:
+                cv2.putText(frame, "Unknown", (20, 60),
+                            cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,0,255), 2)
             
             # Draw visual effects for detected mudras
-            if mudra == "Pataka":
-                # Draw special yellow circle with rays effect above the hand
-                effect_y = wrist_y - 80
-                frame = visual_effects.draw_pataka_effect(frame, wrist_x, effect_y, 40)
-            elif mudra != "Unknown":
-                # Draw simple badge for other mudras
-                effect_y = wrist_y - 80
-                frame = visual_effects.draw_mudra_badge(frame, mudra, wrist_x, effect_y, 25)
+            if len(hand_data) == 1:  # Only draw effects for single hand
+                lm, handedness = hand_data[0]
+                wrist_x = int(lm[0][0] * frame.shape[1])
+                wrist_y = int(lm[0][1] * frame.shape[0])
+                
+                if mudra == "Pataka":
+                    # Draw special yellow circle with rays effect above the hand
+                    effect_y = wrist_y - 80
+                    frame = visual_effects.draw_pataka_effect(frame, wrist_x, effect_y, 40)
+                elif mudra != "Unknown":
+                    # Draw simple badge for other mudras
+                    effect_y = wrist_y - 80
+                    frame = visual_effects.draw_mudra_badge(frame, mudra, wrist_x, effect_y, 25)
+            
+            # Display debug overlay if enabled
+            if debug_mode and debug_info:
+                # Semi-transparent black background for debug panel
+                overlay = frame.copy()
+                cv2.rectangle(overlay, (5, 90), (350, 200), -1)
+                
+                # Debug information lines
+                angles = debug_info.get('finger_angles', {})
+                lines = [
+                    f"Angles: T:{angles.get('thumb', 0):.0f} I:{angles.get('index', 0):.0f} M:{angles.get('middle', 0):.0f} R:{angles.get('ring', 0):.0f} P:{angles.get('pinky', 0):.0f}",
+                    f"Thumb: {debug_info.get('thumb_state', 'unknown')} | Hand Size: {debug_info.get('hand_size', 0):.3f}",
+                    f"Groups: {debug_info.get('stage1_groups', [])}",
+                ]
+                
+                if 'top5' in debug_info:
+                    lines.append("Top 5 Scores:")
+                    for i, (name, scr) in enumerate(debug_info['top5']):
+                        lines.append(f"{i+1}. {name}: {scr:.2f}")
+                
+                # Draw debug text
+                for i, line in enumerate(lines):
+                    cv2.putText(overlay, line, (10, 115 + i*22),
+                                cv2.FONT_HERSHEY_PLAIN, 1.0, (200,255,200), 1)
+                
+                # Blend overlay with original frame
+                cv2.addWeighted(overlay, 0.7, 0, 0, 0, frame)
             
             # Display enhanced debug info for finger states (if enabled)
             if mudra_recognizer.debug_mode:
@@ -179,6 +218,30 @@ def main():
         if key == ord('q') or key == ord('Q') or key == 27:  # q, Q, or ESC
             print("Quit key pressed - closing application...")
             break
+        elif key == ord('d') or key == ord('D'):  # Toggle debug mode
+            debug_mode = not debug_mode
+            mudra_recognizer.debug_mode = debug_mode
+            print(f"Debug mode: {'ON' if debug_mode else 'OFF'}")
+        elif key == ord('f') or key == ord('F'):  # Freeze frame
+            freeze_frame = not freeze_frame
+            print(f"Frame frozen: {'YES' if freeze_frame else 'NO'}")
+        elif key == ord('s') or key == ord('S'):  # Save debug snapshot
+            if debug_info:
+                with open('debug_log.txt', 'a') as f:
+                    f.write(f"Debug Snapshot - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Mudra: {mudra}, Score: {score:.2f}\n")
+                    f.write(f"Hand Size: {debug_info.get('hand_size', 0):.3f}\n")
+                    f.write(f"Groups: {debug_info.get('stage1_groups', [])}\n")
+                    f.write(f"Thumb State: {debug_info.get('thumb_state', 'unknown')}\n")
+                    angles = debug_info.get('finger_angles', {})
+                    f.write(f"Angles: T:{angles.get('thumb', 0):.0f} I:{angles.get('index', 0):.0f} M:{angles.get('middle', 0):.0f} R:{angles.get('ring', 0):.0f} P:{angles.get('pinky', 0):.0f}\n")
+                    if 'top5' in debug_info:
+                        f.write("Top 5 Scores:\n")
+                        for i, (name, scr) in enumerate(debug_info['top5']):
+                            f.write(f"  {i+1}. {name}: {scr:.2f}\n")
+                print("Debug snapshot saved to debug_log.txt")
+            else:
+                print("Debug mode not enabled - press 'd' to enable")
     
     # Cleanup
     print("Cleaning up resources...")
