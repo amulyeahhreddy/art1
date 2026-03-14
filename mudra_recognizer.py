@@ -18,6 +18,14 @@ class MudraRecognizer:
         self.last_features = {}
         self.last_confidence = 0.0
         
+        # Display score smoothing buffers (separate from recognition logic)
+        self.display_scores_right = {}
+        self.display_scores_left  = {}
+        self.DISPLAY_ALPHA = 0.15  # smoothing factor (lower = smoother)
+        
+        # Samyuktha hastas toggle
+        self.samyuktha_enabled = False  # enable when body landmarks added
+        
         # Initialize mudra groups mapping
         self._init_mudra_groups()
     
@@ -112,6 +120,39 @@ class MudraRecognizer:
         if handedness == 'Left':
             lm = [(1.0 - p[0], p[1], p[2]) for p in lm]
         return lm
+    
+    # Helper function aliases for compatibility with user's requested naming
+    def _touching(self, lm, tip1, tip2, hs, threshold=0.12):
+        """Alias for _tips_touching"""
+        return self._tips_touching(lm, tip1, tip2, hs, threshold)
+    
+    def _extended(self, lm, mcp, pip, tip, threshold=150):
+        """Alias for _is_extended"""
+        return self._is_extended(lm, mcp, pip, tip, threshold)
+    
+    def _bent(self, lm, mcp, pip, tip, threshold=120):
+        """Alias for _is_bent"""
+        return self._is_bent(lm, mcp, pip, tip, threshold)
+    
+    def _four_ext(self, lm, threshold=148):
+        """Alias for _all_four_extended"""
+        return self._all_four_extended(lm, threshold)
+    
+    def _four_bent(self, lm, threshold=120):
+        """Alias for _all_four_bent"""
+        return self._all_four_bent(lm, threshold)
+    
+    def _thumb_out(self, lm, hs):
+        """Alias for _thumb_extended"""
+        return self._thumb_extended(lm, hs)
+    
+    def _fangle(self, lm, mcp, pip, tip):
+        """Alias for _finger_angle"""
+        return self._finger_angle(lm, mcp, pip, tip)
+    
+    def _normalize(self, lm, handedness):
+        """Alias for _normalize_hand"""
+        return self._normalize_hand(lm, handedness)
     
     def _get_finger_angles(self, lm):
         """Return dict: {thumb, index, middle, ring, pinky} angles"""
@@ -213,7 +254,7 @@ class MudraRecognizer:
         bent/tucked OVER fingers. No part of thumb extended upward."""
         s = 0.0
         # Four fingers must be tightly bent
-        if self._all_four_bent(lm, 105):          s += 0.50
+        if self._four_bent(lm, 105):          s += 0.50
         # Thumb must be tucked/bent over fingers (not pointing up)
         if self._thumb_tucked(lm, hs):        s += 0.35
         # HARD PENALTY: if thumb tip is above thumb MCP, it is 
@@ -228,9 +269,9 @@ class MudraRecognizer:
         Thumb tip must be clearly ABOVE thumb MCP in image coords."""
         s = 0.0
         # Four fingers must be in fist
-        if self._all_four_bent(lm, 110):          s += 0.45
+        if self._four_bent(lm, 110):          s += 0.45
         # Thumb must be extended outward (not tucked)
-        if self._thumb_extended(lm, hs):           s += 0.25
+        if self._thumb_out(lm, hs):           s += 0.25
         # CRITICAL: thumb tip must be ABOVE thumb MCP 
         # In image coords: lower Y value = higher on screen
         if lm[4][1] < lm[2][1]:              s += 0.30
@@ -539,18 +580,18 @@ class MudraRecognizer:
     def _init_mudra_groups(self):
         """Initialize mudra groups mapping"""
         self.mudra_groups = {
-            'all_open': ['Alapadma', 'Ardhachandra', 'Arala', 'Vismaya', 
-                       'Hamsapaksha', 'Varada', 'Abhaya', 'Sarpashirsha'],
-            'four_open': ['Pataka', 'Sarpashirsha', 'Chatura', 'Tripataka', 'Trishula'],
-            'fist': ['Mushti', 'Shikhara', 'Tamrachuda', 'Kapittha'],
-            'pinch': ['Hamsasya', 'Sandamsha', 'Mayura', 'Mukula', 
-                     'Katakamukha', 'Chandrakala', 'Vyakhyana', 
-                     'Kapittha', 'Bhramara'],
-            'one_up': ['Suchi', 'Tarjani', 'Kangula', 'Shikhara'],
-            'two_up': ['Kartarimukha', 'Ardhapataka', 'Mrigashirsha', 
-                      'Simhamukha', 'Hamsapaksha'],
-            'three_up': ['Tripataka', 'Katakamukha', 'Hamsapaksha', 'Chatura'],
-            'mixed': ['Arala', 'Shukatunda', 'Bhramara', 'Padmakosha', 'Kangula']
+            'all_open': ['Alapadma','Ardhachandra','Arala','Vismaya', 
+                       'Hamsapaksha','Varada','Abhaya','Sarpashirsha'],
+            'four_open': ['Pataka','Sarpashirsha','Chatura', 'Tripataka','Trishula'],
+            'fist': ['Mushti','Shikhara','Tamrachuda','Kapittha'],
+            'pinch': ['Hamsasya','Sandamsha','Mayura','Mukula', 
+                     'Katakamukha','Chandrakala','Vyakhyana', 
+                     'Kapittha','Bhramara'],
+            'one_up': ['Suchi','Tarjani','Kangula','Shikhara'],
+            'two_up': ['Kartarimukha','Ardhapataka','Mrigashirsha', 
+                      'Simhamukha','Hamsapaksha'],
+            'three_up': ['Tripataka','Katakamukha','Hamsapaksha','Chatura'],
+            'mixed': ['Arala','Shukatunda','Bhramara','Padmakosha', 'Kangula','Mrigashirsha'],
         }
         
         # Map mudra names to scoring functions
@@ -649,6 +690,26 @@ class MudraRecognizer:
             if mudra_name in self.mudra_scorers:
                 scores[mudra_name] = self.mudra_scorers[mudra_name](lm, hs)
         
+        # Smooth scores for display only — do NOT use smoothed
+        # scores for the actual recognition decision
+        display_buf = (self.display_scores_right 
+                       if handedness == 'Right' 
+                       else self.display_scores_left)
+        
+        for name, sc in scores.items():
+            if name in display_buf:
+                display_buf[name] = (self.DISPLAY_ALPHA * sc + 
+                                     (1 - self.DISPLAY_ALPHA) * display_buf[name])
+            else:
+                display_buf[name] = sc
+        
+        # Remove mudras that dropped out of candidates
+        for name in list(display_buf.keys()):
+            if name not in scores:
+                display_buf[name] *= 0.85  # decay absent mudras
+                if display_buf[name] < 0.05:
+                    del display_buf[name]
+        
         # Step 5: Pick highest scoring mudra above threshold
         if scores:
             best_mudra = max(scores, key=scores.get)
@@ -671,10 +732,12 @@ class MudraRecognizer:
         final_mudra = self._apply_temporal_smoothing(handedness, result[0])
         
         if debug:
+            smoothed_sorted = sorted(display_buf.items(), 
+                                     key=lambda x: x[1], reverse=True)
             debug_info = {
                 'stage1_groups': groups,
                 'flags': flags,
-                'top5': sorted(scores.items(), key=lambda x: x[1], reverse=True)[:5],
+                'top5': smoothed_sorted[:5],
                 'finger_angles': self._get_finger_angles(lm),
                 'thumb_state': 'tucked' if flags['thumb_tuck'] else 'extended',
                 'hand_size': hs,
@@ -684,25 +747,115 @@ class MudraRecognizer:
         
         return (final_mudra, result[1])
     
-    def recognize_two_hand(self, hand1_data, hand2_data):
-        """
-        Two-hand mudra recognition
-        hand1_data = (landmarks, handedness)
-        hand2_data = (landmarks, handedness)
-        """
-        # For now, return best single-hand result
-        # TODO: Implement two-hand mudras in Phase 6
-        lm1, h1 = hand1_data
-        lm2, h2 = hand2_data
-        
-        result1 = self.recognize_single(lm1, h1)
-        result2 = self.recognize_single(lm2, h2)
-        
-        # Return the higher scoring mudra
-        if result1[1] > result2[1]:
-            return result1
+    def _score_two_hand(self, lm1, hs1, lm2, hs2):
+        scores = {}
+        avg_hs = (hs1 + hs2) / 2
+        w_dist = self._dist(lm1[0], lm2[0])
+        both_open = self._four_ext(lm1) and self._four_ext(lm2)
+        both_fist = self._four_bent(lm1, 110) and self._four_bent(lm2, 110)
+        wrist_cross = abs(lm1[0][0] - lm2[0][0]) < 0.15
+
+        # Anjali — both open palms together
+        s = 0.0
+        if both_open:      s += 0.40
+        if w_dist < 0.25:  s += 0.35
+        if w_dist < 0.15:  s += 0.25
+        scores['Anjali'] = min(s, 1.0)
+
+        # Dola — both fists hanging
+        scores['Dola'] = min(
+            (0.50 if self._four_bent(lm1, 110) else 0) +
+            (0.50 if self._four_bent(lm2, 110) else 0), 1.0)
+
+        # Swastika — both open, wrists crossed
+        scores['Swastika'] = 0.85 if (wrist_cross and both_open) else 0.0
+
+        # Garuda — both sarpashirsha, thumbs touching
+        s = 0.0
+        if self._score_sarpashirsha(lm1, hs1) > 0.55: s += 0.35
+        if self._score_sarpashirsha(lm2, hs2) > 0.55: s += 0.35
+        if self._dist(lm1[4], lm2[4]) / avg_hs < 0.20: s += 0.30
+        scores['Garuda'] = min(s, 1.0)
+
+        # Shivalinga — one fist, one open below
+        fist1 = self._score_mushti(lm1, hs1) > 0.60
+        fist2 = self._score_mushti(lm2, hs2) > 0.60
+        open1 = self._four_ext(lm1, 145)
+        open2 = self._four_ext(lm2, 145)
+        scores['Shivalinga'] = 0.85 if (
+            (fist1 and open2) or (fist2 and open1)) else 0.0
+
+        # Pushpaputa — both open cupped side by side
+        ty1 = np.mean([lm1[8][1], lm1[12][1], lm1[16][1], lm1[20][1]])
+        ty2 = np.mean([lm2[8][1], lm2[12][1], lm2[16][1], lm2[20][1]])
+        s = 0.0
+        if both_open:                                  s += 0.40
+        if ty1 < lm1[0][1] and ty2 < lm2[0][1]:      s += 0.40
+        if w_dist < 0.35:                              s += 0.20
+        scores['Pushpaputa'] = min(s, 1.0)
+
+        # Nagabandha — both sarpashirsha, wrists crossed
+        s = 0.0
+        if self._score_sarpashirsha(lm1, hs1) > 0.55:    s += 0.35
+        if self._score_sarpashirsha(lm2, hs2) > 0.55:    s += 0.35
+        if wrist_cross:                                s += 0.30
+        scores['Nagabandha'] = min(s, 1.0)
+
+        # Dhyana — both open palms up overlapping
+        s = 0.0
+        if both_open:                                  s += 0.60
+        if ty1 < lm1[0][1] and ty2 < lm2[0][1]:      s += 0.20
+        if w_dist < 0.20:                              s += 0.20
+        scores['Dhyana'] = min(s, 1.0)
+
+        # Kapota — both open, fingers overlapping, thumbs close
+        s = 0.0
+        if both_open:                                  s += 0.40
+        if self._dist(lm1[4], lm2[4]) / avg_hs < 0.25: s += 0.30
+        if w_dist < 0.30:                              s += 0.30
+        scores['Kapota'] = min(s, 1.0)
+
+        # Avahitta — both Pataka pointing down, thumbs touching
+        s = 0.0
+        if self._score_pataka(lm1, hs1) > 0.55:           s += 0.30
+        if self._score_pataka(lm2, hs2) > 0.55:           s += 0.30
+        if self._dist(lm1[4], lm2[4]) / avg_hs < 0.20: s += 0.25
+        if (np.mean([lm1[8][1],lm1[12][1],lm1[16][1],lm1[20][1]]) > lm1[0][1] and
+            np.mean([lm2[8][1],lm2[12][1],lm2[16][1],lm2[20][1]]) > lm2[0][1]):
+            s += 0.15
+        scores['Avahitta'] = min(s, 1.0)
+
+        # Vardhamana — both Katakamukha facing apart
+        s = 0.0
+        if self._score_katakamukha(lm1, hs1) > 0.55:      s += 0.50
+        if self._score_katakamukha(lm2, hs2) > 0.55:      s += 0.50
+        scores['Vardhamana'] = min(s, 1.0)
+
+        return scores
+    
+    def recognize_two_hand(self, hand1, hand2):
+        lm1 = self._normalize(hand1[0], hand1[1])
+        lm2 = self._normalize(hand2[0], hand2[1])
+        hs1 = self._hand_size(lm1)
+        hs2 = self._hand_size(lm2)
+
+        # Two-hand mudras disabled until body landmarks added
+        if self.samyuktha_enabled:
+            two_scores = self._score_two_hand(lm1, hs1, lm2, hs2)
+            best_two   = max(two_scores, key=two_scores.get)
+            best_two_s = two_scores[best_two]
         else:
-            return result2
+            best_two_s = 0.0
+            best_two   = "Unknown"
+
+        # Always fall back to best single hand
+        r1 = self.recognize_single(hand1[0], hand1[1])
+        r2 = self.recognize_single(hand2[0], hand2[1])
+        best_single = r1 if r1[1] >= r2[1] else r2
+
+        if self.samyuktha_enabled and best_two_s >= 0.65 and best_two_s > best_single[1]:
+            return best_two, best_two_s
+        return best_single
     
     def _apply_tiebreakers(self, scores, lm, hs):
         """Apply tiebreaker rules to resolve ambiguous cases"""
@@ -721,28 +874,28 @@ class MudraRecognizer:
 
         # 3. Sandamsha vs Hamsasya — middle finger state decides
         if scores.get('Sandamsha',0)>0.55 and scores.get('Hamsasya',0)>0.55:
-            if self._is_extended(lm, 9, 10, 12, 145):
+            if self._extended(lm, 9, 10, 12, 145):
                 scores['Sandamsha'] = 0.0
             else:
                 scores['Hamsasya'] = 0.0
 
         # 4. Tarjani vs Suchi — thumb state decides
         if scores.get('Tarjani',0)>0.55 and scores.get('Suchi',0)>0.55:
-            if self._thumb_extended(lm, hs):
+            if self._thumb_out(lm, hs):
                 scores['Suchi'] = 0.0
             else:
                 scores['Tarjani'] = 0.0
 
         # 5. Chatura vs Tripataka — pinky state decides
         if scores.get('Chatura',0)>0.55 and scores.get('Tripataka',0)>0.55:
-            if self._is_bent(lm, 17, 18, 20):
+            if self._bent(lm, 17, 18, 20):
                 scores['Tripataka'] = 0.0
             else:
                 scores['Chatura'] = 0.0
 
         # 6. Tamrachuda vs Shikhara — index extension decides
         if scores.get('Tamrachuda',0)>0.55 and scores.get('Shikhara',0)>0.55:
-            if self._is_extended(lm, 5, 6, 8, 155):
+            if self._extended(lm, 5, 6, 8, 155):
                 scores['Shikhara'] = 0.0
             else:
                 scores['Tamrachuda'] = 0.0

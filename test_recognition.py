@@ -24,5 +24,12 @@ test_landmarks = [
 ]
 
 recognizer = MudraRecognizer()
-mudra, score = recognizer.recognize_single(test_landmarks, 'Right', debug=True)
+result = recognizer.recognize_single(test_landmarks, 'Right', debug=True)
+if len(result) == 3:
+    mudra, score, debug_info = result
+else:
+    mudra, score = result
+    debug_info = {}
 print(f'Test result: {mudra} with score {score:.2f}')
+if debug_info:
+    print(f'Debug info: {debug_info}')

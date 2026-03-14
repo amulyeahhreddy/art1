@@ -3,6 +3,7 @@ import time
 from hand_tracker import HandTracker
 from mudra_recognizer import MudraRecognizer
 from visual_effects import VisualEffects
+from visual_engine import VisualEngine
 
 
 def main():
@@ -44,10 +45,13 @@ def main():
     hand_tracker = HandTracker()
     mudra_recognizer = MudraRecognizer()
     visual_effects = VisualEffects()
+    engine = VisualEngine(width=640, height=480)
     
     # Debug mode and freeze frame state
     debug_mode = False
     freeze_frame = False
+    last_debug_info = None
+    debug_info = None
     
     # FPS calculation
     fps_counter = 0
@@ -96,27 +100,44 @@ def main():
                 handedness = results.multi_handedness[i].classification[0].label
                 hand_data.append((lm_list, handedness))
 
-        debug_info = None
         if len(hand_data) == 0:
             mudra, score = "Unknown", 0.0
         elif len(hand_data) == 1:
             if debug_mode:
                 mudra, score, debug_info = mudra_recognizer.recognize_single(
                     hand_data[0][0], hand_data[0][1], debug=True)
+                last_debug_info = debug_info  # cache it
             else:
                 mudra, score = mudra_recognizer.recognize_single(
                     hand_data[0][0], hand_data[0][1])
         else:  # 2 hands
             mudra, score = mudra_recognizer.recognize_two_hand(hand_data[0], hand_data[1])
+        
+        # ── Visual Engine ──────────────────────────────
+        # VISUALS TEMPORARILY DISABLED — re-enable after detection fixed
+        # if hand_data:
+        #     engine.update_hands(hand_data[0][0], hand_data[0][1])
+
+        # FUTURE: uncomment when MediaPipe Pose is added
+        # if pose_results and pose_results.pose_landmarks:
+        #     pose_lm = [(lm.x, lm.y, lm.z)
+        #                for lm in pose_results.pose_landmarks.landmark]
+        #     engine.update_body(pose_lm)
+
+        # if mudra != "Unknown":
+        #     engine.set_mudra(mudra)
+
+        # frame = engine.render(frame)
+        # ── End Visual Engine ───────────────────────────
             
-            # Display mudra name and confidence
-            if mudra != "Unknown":
-                label = f"{mudra}  {int(score*100)}%"
-                cv2.putText(frame, label, (20, 60),
-                            cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,255,180), 2)
-            else:
-                cv2.putText(frame, "Unknown", (20, 60),
-                            cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,0,255), 2)
+        # Display mudra name and confidence
+        if mudra != "Unknown":
+            label = f"{mudra}  {int(score*100)}%"
+            cv2.putText(frame, label, (20, 60),
+                        cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,255,180), 2)
+        else:
+            cv2.putText(frame, "Unknown", (20, 60),
+                        cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,0,255), 2)
             
             # Draw visual effects for detected mudras
             if len(hand_data) == 1:  # Only draw effects for single hand
@@ -133,61 +154,56 @@ def main():
                     effect_y = wrist_y - 80
                     frame = visual_effects.draw_mudra_badge(frame, mudra, wrist_x, effect_y, 25)
             
-            # Display debug overlay if enabled
-            if debug_mode and debug_info:
-                # Semi-transparent black background for debug panel
+            if debug_mode and last_debug_info:
+                di = last_debug_info
                 overlay = frame.copy()
-                cv2.rectangle(overlay, (5, 90), (350, 200), -1)
-                
-                # Debug information lines
-                angles = debug_info.get('finger_angles', {})
+                cv2.rectangle(overlay, (5, 85), (420, 340),
+                              (0,0,0), -1)
+
+                # Finger angles
+                angles = di.get('finger_angles', {})
+                a_line = (
+                    f"T:{angles.get('thumb',0):.0f} "
+                    f"I:{angles.get('index',0):.0f} "
+                    f"M:{angles.get('middle',0):.0f} "
+                    f"R:{angles.get('ring',0):.0f} "
+                    f"P:{angles.get('pinky',0):.0f}"
+                )
+
+                # Build lines using CORRECT dict keys
                 lines = [
-                    f"Angles: T:{angles.get('thumb', 0):.0f} I:{angles.get('index', 0):.0f} M:{angles.get('middle', 0):.0f} R:{angles.get('ring', 0):.0f} P:{angles.get('pinky', 0):.0f}",
-                    f"Thumb: {debug_info.get('thumb_state', 'unknown')} | Hand Size: {debug_info.get('hand_size', 0):.3f}",
-                    f"Groups: {debug_info.get('stage1_groups', [])}",
+                    a_line,
+                    f"Thumb: {di.get('thumb_state','?').upper()}",
+                    f"Groups: {di.get('stage1_groups',[])}",
+                    f"HandSize: {di.get('hand_size',0):.3f}",
+                    f"Detected: {mudra} ({score:.2f})",
+                    "─── Top 5 ───────────────",
                 ]
-                
-                if 'top5' in debug_info:
-                    lines.append("Top 5 Scores:")
-                    for i, (name, scr) in enumerate(debug_info['top5']):
-                        lines.append(f"{i+1}. {name}: {scr:.2f}")
-                
-                # Draw debug text
+
+                top5 = di.get('top5', [])
+                if top5:
+                    for i, item in enumerate(top5[:5]):
+                        # handle both (name, score) tuple and other formats
+                        if isinstance(item, (list, tuple)) and len(item) == 2:
+                            name, scr = item
+                            bar = int(scr * 12)
+                            lines.append(
+                                f"{i+1}. {name}: {scr:.2f} "
+                                f"{'|' * bar}")
+                        else:
+                            lines.append(f"{i+1}. {str(item)}")
+                else:
+                    lines.append("  (no scores yet)")
+
                 for i, line in enumerate(lines):
-                    cv2.putText(overlay, line, (10, 115 + i*22),
-                                cv2.FONT_HERSHEY_PLAIN, 1.0, (200,255,200), 1)
-                
-                # Blend overlay with original frame
-                cv2.addWeighted(overlay, 0.7, 0, 0, 0, frame)
-            
-            # Display enhanced debug info for finger states (if enabled)
-            if mudra_recognizer.debug_mode:
-                debug_info = mudra_recognizer.get_debug_info()
-                debug_y = wrist_y + 20
-                
-                # Display finger states
-                finger_states = debug_info.get('finger_states', {})
-                for finger, state in finger_states.items():
-                    debug_text = f"{finger}: {state}"
-                    cv2.putText(frame, debug_text, (wrist_x, debug_y),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-                    debug_y += 15
-                
-                # Display confidence score
-                confidence = debug_info.get('confidence', 0)
-                conf_text = f"Confidence: {confidence:.2f}"
-                cv2.putText(frame, conf_text, (wrist_x, debug_y),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-                debug_y += 15
-                
-                # Display finger angles for extended fingers
-                finger_angles = debug_info.get('finger_angles', {})
-                for finger, angle in finger_angles.items():
-                    if finger_states.get(finger) == 'extended':
-                        angle_text = f"{finger}: {angle:.0f}°"
-                        cv2.putText(frame, angle_text, (wrist_x, debug_y),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 255), 1)
-                        debug_y += 12
+                    cv2.putText(overlay, line,
+                                (10, 105 + i * 22),
+                                cv2.FONT_HERSHEY_PLAIN,
+                                1.0,
+                                (100, 255, 100), 1)
+
+                cv2.addWeighted(overlay, 0.65,
+                                frame, 0.35, 0, frame)
         
         # Calculate and display FPS
         fps_counter += 1
@@ -242,9 +258,13 @@ def main():
                 print("Debug snapshot saved to debug_log.txt")
             else:
                 print("Debug mode not enabled - press 'd' to enable")
+        elif key == ord('t') or key == ord('T'):  # Toggle Samyuktha Hastas
+            mudra_recognizer.samyuktha_enabled = not mudra_recognizer.samyuktha_enabled
+            print(f"Samyuktha Hastas: {'ON' if mudra_recognizer.samyuktha_enabled else 'OFF'}")
     
     # Cleanup
     print("Cleaning up resources...")
+    engine.clear()
     
     # Release camera
     if cap is not None and cap.isOpened():
