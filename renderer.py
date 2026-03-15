@@ -691,6 +691,585 @@ def draw_alapadma_lotus(frame, cx, cy, radius, color, now):
 
 
 # ─────────────────────────────────────────────────────
+# GROUP 2 GEOMETRY FUNCTIONS
+# ─────────────────────────────────────────────────────
+
+def draw_katakamukha_petals(frame, cx, cy,
+                             radius, color, now):
+    """Petal shower falling from the three-finger
+    pinch point. Petals are small diamond shapes
+    that appear at pinch and fall downward.
+    Uses a fixed random seed per petal for stable
+    non-flickering positions."""
+
+    # Pinch point — between thumb(4), index(8), middle(12)
+    # Approximated as slightly above palm center
+    pinch_x = cx
+    pinch_y = cy - int(radius * 0.6)
+
+    # Soft glow at pinch point
+    ov = frame.copy()
+    cv2.circle(ov, (pinch_x, pinch_y),
+               int(radius * 0.5), color, -1)
+    cv2.addWeighted(ov, 0.30, frame, 0.70, 0, frame)
+    cv2.circle(frame, (pinch_x, pinch_y),
+               int(radius * 0.2), color, 2)
+
+    # Cascading petal stream downward
+    # Each petal at different stage of falling
+    n_petals = 12
+    petal_colors = [
+        (180, 160, 255),  # rose pink
+        (200, 180, 255),  # light pink
+        (160, 140, 240),  # deep pink
+        (220, 200, 255),  # pale pink
+        (140, 200, 255),  # jasmine white-pink
+    ]
+
+    rng = np.random.RandomState(7)
+    for i in range(n_petals):
+        # Each petal has a fixed horizontal drift
+        x_drift  = rng.randint(-int(radius*1.5),
+                                int(radius*1.5))
+        # Fall speed varies per petal
+        fall_spd = 0.4 + rng.random() * 0.6
+        petal_size = rng.randint(4, 10)
+        color_idx  = rng.randint(0, len(petal_colors))
+
+        # Animate falling using time
+        t = (now * fall_spd + i * 0.7) % 1.0
+        fall_dist = int(t * radius * 4.0)
+
+        px = pinch_x + x_drift
+        py = pinch_y + fall_dist
+
+        # Fade as petal falls
+        alpha = max(0, 1.0 - t) * 0.75
+
+        # Small diamond petal shape
+        s = petal_size
+        pts = np.array([
+            [px,     py - s],   # top
+            [px + s, py],       # right
+            [px,     py + s],   # bottom
+            [px - s, py],       # left
+        ], np.int32).reshape((-1,1,2))
+
+        # Rotate petal slightly based on drift
+        petal_color = petal_colors[color_idx]
+        ov = frame.copy()
+        cv2.fillPoly(ov, [pts], petal_color)
+        cv2.addWeighted(ov, alpha,
+                        frame, 1-alpha, 0, frame)
+        cv2.polylines(frame, [pts], True,
+                      petal_color, 1)
+
+    # Garland arc below pinch — decorative curve
+    arc_pts = []
+    for t in np.linspace(-math.pi*0.6,
+                          math.pi*0.6, 40):
+        ax = int(pinch_x + math.sin(t)*radius*1.2)
+        ay = int(pinch_y + int(radius*0.8)
+                 + math.cos(t)*radius*0.3)
+        arc_pts.append((ax, ay))
+    if len(arc_pts) > 1:
+        ov = frame.copy()
+        for i in range(1, len(arc_pts)):
+            cv2.line(ov, arc_pts[i-1], arc_pts[i],
+                     color, 1)
+        cv2.addWeighted(ov, 0.50,
+                        frame, 0.50, 0, frame)
+
+
+def draw_mushti_core(frame, cx, cy,
+                     radius, color, now):
+    """Heavy pulsing radial glow from inside fist.
+    Sine wave oscillates intensity like a heartbeat.
+    Deep crimson core that breathes in and out."""
+
+    # Pulse using sine wave — heartbeat rhythm
+    pulse_fast  = (math.sin(now * 3.5) + 1) / 2
+    pulse_slow  = (math.sin(now * 1.2) + 1) / 2
+    combined    = pulse_fast * 0.6 + pulse_slow * 0.4
+
+    # Core radius pulses
+    core_r  = int(radius * (0.5 + combined * 0.4))
+    inner_r = int(radius * (0.25 + combined * 0.20))
+
+    # Outer shockwave ring — appears at pulse peak
+    if pulse_fast > 0.85:
+        shock_r = int(radius * (1.5 + pulse_fast * 0.8))
+        ov = frame.copy()
+        cv2.circle(ov, (cx,cy), shock_r, color, 2)
+        cv2.addWeighted(ov, 0.60,
+                        frame, 0.40, 0, frame)
+
+    # Multiple glow layers — radial gradient simulation
+    glow_layers = [
+        (radius * 2.2, 0.08 * combined),
+        (radius * 1.7, 0.15 * combined),
+        (radius * 1.3, 0.25 * combined),
+        (radius * 1.0, 0.40 * combined),
+        (core_r,       0.60 * combined),
+        (inner_r,      0.80),
+    ]
+    for r_mult, alpha in glow_layers:
+        r = int(r_mult)
+        if r < 1:
+            continue
+        ov = frame.copy()
+        cv2.circle(ov, (cx,cy), r, color, -1)
+        cv2.addWeighted(ov, alpha,
+                        frame, 1-alpha, 0, frame)
+
+    # Bright white hot center at peak
+    if combined > 0.6:
+        white_r = int(radius * 0.12 * combined)
+        ov = frame.copy()
+        cv2.circle(ov, (cx,cy),
+                   white_r, (255,255,255), -1)
+        cv2.addWeighted(ov, combined * 0.90,
+                        frame, 1-combined*0.90,
+                        0, frame)
+
+    # Radiating crack lines at pulse peak
+    if pulse_fast > 0.70:
+        n_cracks = 8
+        crack_len = int(radius * (1.5 + combined))
+        for i in range(n_cracks):
+            angle = (2*math.pi/n_cracks)*i
+            ex = int(cx + math.cos(angle)*crack_len)
+            ey = int(cy + math.sin(angle)*crack_len)
+            ov = frame.copy()
+            cv2.line(ov, (cx,cy), (ex,ey),
+                     color, 1)
+            cv2.addWeighted(ov, 0.45 * pulse_fast,
+                            frame,
+                            1-0.45*pulse_fast,
+                            0, frame)
+
+
+def draw_shikhara_pillar(frame, cx, cy,
+                              radius, color, now):
+        """Sacred pillar / Shiva lingam rising upward.
+        Vertical beam with glowing column.
+        Bow effect deferred until body landmarks added."""
+
+        pillar_h = int(radius * 3.8)
+        top_y    = cy - pillar_h
+        pulse    = (math.sin(now * 1.5) + 1) / 2
+
+        # Outer soft glow column
+        for w, alpha in [(20,0.08),(14,0.14),(8,0.25),(4,0.55)]:
+            ov = frame.copy()
+            cv2.rectangle(ov,
+                (cx - w, top_y),
+                (cx + w, cy),
+                color, -1)
+            cv2.addWeighted(ov, alpha,
+                            frame, 1-alpha, 0, frame)
+
+        # Bright core line
+        ov = frame.copy()
+        cv2.line(ov, (cx, top_y), (cx, cy), color, 2)
+        cv2.addWeighted(ov, 0.85, frame, 0.15, 0, frame)
+
+        # Pulsing base glow
+        base_r = int(radius * (0.7 + pulse*0.3))
+        ov = frame.copy()
+        cv2.circle(ov, (cx,cy), base_r, color, -1)
+        cv2.addWeighted(ov, 0.25 + pulse*0.15,
+                        frame,
+                        1-(0.25+pulse*0.15),
+                        0, frame)
+
+        # Top cap glow
+        ov = frame.copy()
+        cv2.circle(ov, (cx, top_y),
+                   int(radius*0.3), color, -1)
+        cv2.addWeighted(ov, 0.60, frame, 0.40, 0, frame)
+
+        # Sparkles along pillar
+        if int(now*20) % 2 == 0:
+            sy = np.random.randint(top_y, cy)
+            sx = cx + np.random.randint(-6, 6)
+            cv2.circle(frame, (sx,sy), 2,
+                       (255,255,255), -1)
+
+
+def draw_trishula_flames(frame, cx, cy,
+                          radius, color, now,
+                          tip1=None, tip2=None,
+                          tip3=None):
+    """Three independent flame trails from three
+    fingertip landmarks (index=8, middle=12, ring=16).
+    Each fingertip is an independent flame emitter.
+    If landmarks not passed, estimate positions."""
+
+    # Estimate fingertip positions if not provided
+    if tip1 is None:
+        tip1 = (cx - int(radius*0.5),
+                cy - int(radius*1.5))
+    if tip2 is None:
+        tip2 = (cx, cy - int(radius*1.8))
+    if tip3 is None:
+        tip3 = (cx + int(radius*0.5),
+                cy - int(radius*1.5))
+
+    flame_tips = [tip1, tip2, tip3]
+
+    # Each flame has slightly different color
+    flame_colors = [
+        (0,  80, 255),   # deep violet-blue (BGR)
+        (60, 40, 200),   # deep purple
+        (0,  80, 255),   # deep violet-blue
+    ]
+
+    def draw_single_flame(frame, fx, fy,
+                          f_color, phase, now):
+        """One flame column above a fingertip."""
+        n_segments = 8
+        flame_h    = int(radius * 2.5)
+        flame_w    = int(radius * 0.35)
+
+        for seg in range(n_segments):
+            t = seg / n_segments
+            t_next = (seg + 1) / n_segments
+
+            # Width narrows toward tip
+            w1 = int(flame_w * (1.0 - t) * 0.8)
+            w2 = int(flame_w * (1.0 - t_next) * 0.8)
+
+            # Flame wobble
+            wobble1 = int(math.sin(
+                now*4 + t*6 + phase) * flame_w*0.4)
+            wobble2 = int(math.sin(
+                now*4 + t_next*6 + phase)*flame_w*0.4)
+
+            y1 = int(fy - t * flame_h)
+            y2 = int(fy - t_next * flame_h)
+            x1 = fx + wobble1
+            x2 = fx + wobble2
+
+            # Flame segment polygon
+            seg_pts = np.array([
+                [x1-w1, y1],
+                [x1+w1, y1],
+                [x2+w2, y2],
+                [x2-w2, y2],
+            ], np.int32).reshape((-1,1,2))
+
+            # Alpha fades toward tip
+            alpha = (1.0 - t) * 0.65
+            brightness = 1.0 - t * 0.6
+            fc = tuple(int(c*brightness)
+                       for c in f_color)
+
+            ov = frame.copy()
+            cv2.fillPoly(ov, [seg_pts], fc)
+            cv2.addWeighted(ov, alpha,
+                            frame, 1-alpha,
+                            0, frame)
+
+        # Bright base glow at fingertip
+        ov = frame.copy()
+        cv2.circle(ov, (fx,fy),
+                   int(radius*0.25), f_color, -1)
+        cv2.addWeighted(ov, 0.60,
+                        frame, 0.40, 0, frame)
+
+        # White hot core at base
+        cv2.circle(frame, (fx,fy),
+                   int(radius*0.10),
+                   (255,255,255), -1)
+
+    # Draw all three flames
+    for i, (tip, fc) in enumerate(
+            zip(flame_tips, flame_colors)):
+        draw_single_flame(frame, tip[0], tip[1],
+                          fc, i * 1.2, now)
+
+    # Trident shaft below palm
+    shaft_top_y    = cy
+    shaft_bottom_y = cy + int(radius * 1.5)
+    ov = frame.copy()
+    cv2.line(ov, (cx, shaft_top_y),
+                 (cx, shaft_bottom_y), color, 3)
+    cv2.addWeighted(ov, 0.70, frame, 0.30, 0, frame)
+
+    # Crossbar on shaft
+    cross_y = cy + int(radius * 0.5)
+    ov = frame.copy()
+    cv2.line(ov,
+        (cx - int(radius*0.6), cross_y),
+        (cx + int(radius*0.6), cross_y),
+        color, 2)
+    cv2.addWeighted(ov, 0.60, frame, 0.40, 0, frame)
+
+
+def draw_tamrachuda_crest(frame, cx, cy,
+                               radius, color, now):
+        """Rooster: proud crowing bird visual.
+        Sharp upward crest spike + spread tail feathers
+        fanning downward behind hand.
+        Fire-red and gold rooster colors."""
+
+        # ── Upward crest spike (rooster comb) ───────
+        crest_h   = int(radius * 3.0)
+        crest_top = cy - crest_h
+        pulse     = (math.sin(now*3.0)+1)/2
+
+        # Crest glow
+        for w, alpha in [(12,0.12),(7,0.22),(3,0.55)]:
+            ov = frame.copy()
+            cv2.line(ov, (cx,cy),
+                        (cx, crest_top), color, w)
+            cv2.addWeighted(ov, alpha,
+                            frame, 1-alpha, 0, frame)
+        cv2.line(frame, (cx,cy),
+                         (cx, crest_top), color, 1)
+
+        # Crest tip — bright spike
+        ov = frame.copy()
+        cv2.circle(ov, (cx, crest_top),
+                   int(radius*0.20), color, -1)
+        cv2.addWeighted(ov, 0.80,
+                        frame, 0.20, 0, frame)
+
+        # Crest side spurs — rooster comb bumps
+        n_spurs = 3
+        for i in range(n_spurs):
+            spur_y = crest_top + int(
+                (i+1) * crest_h * 0.22)
+            spur_w = int(radius * (0.25 - i*0.05))
+            spur_h = int(radius * (0.30 - i*0.06))
+            # Left spur
+            ov = frame.copy()
+            cv2.ellipse(ov,
+                (cx - spur_w, spur_y),
+                (spur_w, spur_h),
+                0, 180, 360, color, -1)
+            cv2.addWeighted(ov, 0.55,
+                            frame, 0.45, 0, frame)
+
+        # ── Tail feathers fanning downward ──────────
+        # Rooster tail fans out and DOWN behind bird
+        tail_colors = [
+            (0,   70, 200),   # deep red
+            (0,  110, 230),   # bright red
+            (0,  150, 240),   # orange-red
+            (20, 180, 230),   # orange
+            (40, 200, 200),   # gold-orange
+        ]
+
+        n_tail = 10
+        for i in range(n_tail):
+            t = i / (n_tail-1)
+            # Fan from lower-left to lower-right
+            angle = math.radians(
+                120 + t*120)  # 120 to 240 degrees
+            # Tail length varies
+            center_t = 1.0 - abs(t-0.5)*2
+            t_len = int(radius*(1.6 + center_t*1.2))
+
+            # Animate tail with gentle wave
+            wave = math.sin(now*1.2 + i*0.5)*0.06
+            angle += wave
+
+            tip_x = int(cx + math.cos(angle)*t_len)
+            tip_y = int(cy + math.sin(angle)*t_len)
+
+            # Curved feather line
+            ctrl_x = int(cx + math.cos(angle)*t_len*0.5
+                + math.cos(angle+math.pi/2)*radius*0.3)
+            ctrl_y = int(cy + math.sin(angle)*t_len*0.5
+                + math.sin(angle+math.pi/2)*radius*0.3)
+
+            f_pts = []
+            for s in range(20):
+                st = s/19
+                bx = int((1-st)**2*cx
+                         + 2*(1-st)*st*ctrl_x
+                         + st**2*tip_x)
+                by = int((1-st)**2*cy
+                         + 2*(1-st)*st*ctrl_y
+                         + st**2*tip_y)
+                f_pts.append((bx,by))
+
+            color_idx = int(
+                t*(len(tail_colors)-1))
+            fc = tail_colors[color_idx]
+            alpha = 0.50 + center_t*0.30
+
+            ov = frame.copy()
+            for j in range(1, len(f_pts)):
+                fade = 1.0 - j/len(f_pts)
+                fc_fade = tuple(
+                    int(c*fade) for c in fc)
+                cv2.line(ov,
+                    f_pts[j-1], f_pts[j],
+                    fc_fade, 2)
+            cv2.addWeighted(ov, alpha,
+                            frame, 1-alpha,
+                            0, frame)
+
+            # Dot at feather tip
+            if center_t > 0.3:
+                cv2.circle(frame,
+                    (tip_x,tip_y), 2, fc, -1)
+
+        # ── Bird beak aura ───────────────────────────
+        # Sharp triangular beak pointing forward
+        # from the index finger area
+        # Beak direction: forward/right from hand
+        # Color: bright red for rooster
+
+        beak_color = (0, 60, 220)   # rooster red BGR
+
+        # Beak tip — extends forward from palm
+        beak_tip_x  = cx + int(radius * 2.2)
+        beak_tip_y  = cy - int(radius * 0.3)
+
+        # Beak base — two points behind tip
+        beak_base_y_gap = int(radius * 0.35)
+        beak_b1_x = cx + int(radius * 0.6)
+        beak_b1_y = beak_tip_y - beak_base_y_gap
+        beak_b2_x = cx + int(radius * 0.6)
+        beak_b2_y = beak_tip_y + beak_base_y_gap
+
+        beak_pts = np.array([
+            [beak_b1_x, beak_b1_y],
+            [beak_tip_x, beak_tip_y],
+            [beak_b2_x, beak_b2_y],
+        ], np.int32).reshape((-1,1,2))
+
+        # Filled beak
+        ov = frame.copy()
+        cv2.fillPoly(ov, [beak_pts], beak_color)
+        cv2.addWeighted(ov, 0.75,
+                        frame, 0.25, 0, frame)
+
+        # Sharp beak outline
+        cv2.polylines(frame, [beak_pts],
+                      True, beak_color, 1)
+
+        # Beak glow
+        ov = frame.copy()
+        cv2.fillPoly(ov, [beak_pts],
+                     (20, 100, 240))
+        cv2.addWeighted(ov, 0.20,
+                        frame, 0.80, 0, frame)
+
+        # Small bright eye dot above beak base
+        eye_x = beak_b1_x - int(radius*0.1)
+        eye_y = beak_b1_y - int(radius*0.2)
+        cv2.circle(frame, (eye_x, eye_y),
+                   3, (255,255,255), -1)
+        ov = frame.copy()
+        cv2.circle(ov, (eye_x, eye_y),
+                   7, beak_color, -1)
+        cv2.addWeighted(ov, 0.40,
+                        frame, 0.60, 0, frame)
+
+        # ── Palm glow ────────────────────────────────
+        ov = frame.copy()
+        cv2.circle(ov, (cx,cy),
+                   int(radius*0.85), color, -1)
+        cv2.addWeighted(ov, 0.22,
+                        frame, 0.78, 0, frame)
+
+
+def draw_kartarimukha_lightning(frame, cx, cy,
+                                 radius, color, now):
+    """Two jagged lightning bolts diverging from palm.
+    Like separation or lightning splitting.
+    Each bolt is a jagged polyline that re-randomizes
+    every few frames for flickering effect."""
+
+    def jagged_bolt(start_x, start_y,
+                    end_x, end_y,
+                    jag, n_segs, seed):
+        """Generate jagged lightning bolt points."""
+        rng = np.random.RandomState(seed)
+        pts = [(start_x, start_y)]
+        for i in range(1, n_segs):
+            t  = i / n_segs
+            mx = int(start_x + (end_x-start_x)*t
+                     + rng.randint(-jag, jag))
+            my = int(start_y + (end_y-start_y)*t
+                     + rng.randint(-jag, jag))
+            pts.append((mx, my))
+        pts.append((end_x, end_y))
+        return pts
+
+    # Seed changes every 3 frames for flicker
+    flicker_seed = int(now * 10) % 8
+
+    # Two bolt endpoints — diverge outward
+    spread = int(radius * 2.5)
+    bolt_len = int(radius * 3.0)
+
+    # Left bolt — goes up-left
+    l_end_x = cx - spread
+    l_end_y = cy - bolt_len
+    # Right bolt — goes up-right
+    r_end_x = cx + spread
+    r_end_y = cy - bolt_len
+
+    jag_amount = int(radius * 0.25)
+
+    for bolt_end, seed_offset in [
+        ((l_end_x, l_end_y), 0),
+        ((r_end_x, r_end_y), 4),
+    ]:
+        bolt_pts = jagged_bolt(
+            cx, cy,
+            bolt_end[0], bolt_end[1],
+            jag_amount, 12,
+            flicker_seed + seed_offset)
+
+        # Outer glow bolt
+        ov = frame.copy()
+        for i in range(1, len(bolt_pts)):
+            cv2.line(ov, bolt_pts[i-1],
+                     bolt_pts[i], color, 5)
+        cv2.addWeighted(ov, 0.25,
+                        frame, 0.75, 0, frame)
+
+        # Mid bolt
+        ov = frame.copy()
+        for i in range(1, len(bolt_pts)):
+            cv2.line(ov, bolt_pts[i-1],
+                     bolt_pts[i], color, 2)
+        cv2.addWeighted(ov, 0.65,
+                        frame, 0.35, 0, frame)
+
+        # Bright core
+        for i in range(1, len(bolt_pts)):
+            cv2.line(frame,
+                     bolt_pts[i-1], bolt_pts[i],
+                     (255,255,255), 1)
+
+        # Bright flash at bolt tip
+        ov = frame.copy()
+        cv2.circle(ov, bolt_end,
+                   int(radius*0.2), color, -1)
+        cv2.addWeighted(ov, 0.70,
+                        frame, 0.30, 0, frame)
+
+    # Central flash at palm
+    flash = (math.sin(now * 8) + 1) / 2
+    ov = frame.copy()
+    cv2.circle(ov, (cx,cy),
+               int(radius * (0.4 + flash*0.3)),
+               color, -1)
+    cv2.addWeighted(ov, 0.35 + flash*0.25,
+                    frame,
+                    1-(0.35+flash*0.25),
+                    0, frame)
+
+
+# ─────────────────────────────────────────────────────
 # MUDRA THEMES — Group 1 only
 # ─────────────────────────────────────────────────────
 
@@ -739,6 +1318,60 @@ MUDRA_THEMES = {
         'p_behavior':  'none',
         'p_count':     0,
         'trail_color': (125, 145, 250),
+    },
+    'Katakamukha': {
+        'color':       (160, 130, 230),  # flower pink
+        'glow_color':  (150, 120, 220),
+        'p_color':     (170, 140, 235),
+        'geometry_fn': draw_katakamukha_petals,
+        'p_behavior':  'none',
+        'p_count':     0,
+        'trail_color': (155, 125, 225),
+    },
+    'Mushti': {
+        'color':       (30,  20, 180),   # deep crimson
+        'glow_color':  (20,  10, 160),
+        'p_color':     (40,  30, 195),
+        'geometry_fn': draw_mushti_core,
+        'p_behavior':  'none',
+        'p_count':     0,
+        'trail_color': (25,  15, 170),
+    },
+    'Shikhara': {
+        'color':       (0,  140, 255),   # saffron
+        'glow_color':  (0,  120, 240),
+        'p_color':     (20, 160, 255),
+        'geometry_fn': draw_shikhara_pillar,
+        'p_behavior':  'rise',
+        'p_count':     3,
+        'trail_color': (0,  130, 245),
+    },
+    'Trishula': {
+        'color':       (200, 60, 120),   # deep violet
+        'glow_color':  (180, 40, 100),
+        'p_color':     (210, 70, 130),
+        'geometry_fn': draw_trishula_flames,
+        'p_behavior':  'none',
+        'p_count':     0,
+        'trail_color': (190, 50, 110),
+    },
+    'Tamrachuda': {
+        'color':       (0,  100, 220),   # fire red
+        'glow_color':  (0,   80, 200),
+        'p_color':     (20, 120, 235),
+        'geometry_fn': draw_tamrachuda_crest,
+        'p_behavior':  'none',
+        'p_count':     0,
+        'trail_color': (0,   90, 210),
+    },
+    'Kartarimukha': {
+        'color':       (255, 200, 100),  # electric blue
+        'glow_color':  (240, 185,  90),
+        'p_color':     (255, 210, 120),
+        'geometry_fn': draw_kartarimukha_lightning,
+        'p_behavior':  'scatter',
+        'p_count':     4,
+        'trail_color': (245, 190,  95),
     },
 }
 
@@ -816,13 +1449,25 @@ class MudraRenderer:
         draw_glow(frame, cx, cy, radius, g_color)
 
         # LAYER 3 — Geometry
-        # Special case: Ardhapataka needs second hand pos
+        # Special cases that need landmark positions
         if mudra == 'Ardhapataka' and \
                 hasattr(self, 'second_hand_pos') and \
                 self.second_hand_pos is not None:
             tx, ty = self.second_hand_pos
             geo_fn(frame, cx, cy, radius,
                    color, now, tx, ty)
+        elif mudra == 'Trishula':
+            # Pass three fingertip positions
+            t1 = (int(landmarks[8][0]*self.w),
+                  int(landmarks[8][1]*self.h))
+            t2 = (int(landmarks[12][0]*self.w),
+                  int(landmarks[12][1]*self.h))
+            t3 = (int(landmarks[16][0]*self.w),
+                  int(landmarks[16][1]*self.h))
+            geo_fn(frame, cx, cy, radius, color, now,
+                   t1, t2, t3)
+        elif mudra == 'Shikhara':
+            geo_fn(frame, cx, cy, radius, color, now)
         else:
             geo_fn(frame, cx, cy, radius, color, now)
 

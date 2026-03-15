@@ -444,25 +444,31 @@ class MudraRecognizer:
         return min(s, 1.0)
 
     def _s_mushti(self, lm, hs):
-        """Full fist. All 4 bent. Thumb tucked over fingers."""
+        """Full fist. All 4 bent. Thumb tucked OVER fingers.
+        Thumb tip must be BELOW thumb MCP (not pointing up)."""
         if not self._four_bent(lm, 108): return 0.0
         if not self._thumb_tucked(lm, hs): return 0.0
-        if lm[4][1] < lm[2][1]: return 0.0  # thumb pointing up = Shikhara
-        s = 0.55
-        s += 0.35 if self._thumb_tucked(lm, hs) else 0.0
-        if self._dist(lm[4], lm[5]) / hs < 0.30: s += 0.10
+        # CRITICAL: thumb tip must NOT be above thumb MCP
+        # lm[4][1] < lm[2][1] means tip is higher = Shikhara
+        if lm[4][1] < lm[2][1]: return 0.0
+        s = 0.60
+        s += 0.25 if self._thumb_tucked(lm, hs) else 0.0
+        if self._dist(lm[4], lm[5]) / hs < 0.28:
+            s += 0.15
         return min(s, 1.0)
 
     def _s_shikhara(self, lm, hs):
-        """Fist with thumb pointing UP."""
-        # Hard gate: index must be bent (not curved on thumb)
-        if not self._bent(lm, 5, 6, 8, 130): return 0.0
+        """Fist with thumb pointing UP.
+        Thumb tip must be clearly ABOVE thumb MCP."""
         if not self._four_bent(lm, 112): return 0.0
         if not self._thumb_out(lm, hs): return 0.0
+        # CRITICAL: thumb tip must be above thumb MCP
         if not lm[4][1] < lm[2][1]: return 0.0
-        s = 0.45 + 0.25
-        if lm[4][1] < lm[2][1]: s += 0.30
-        if lm[4][1] < lm[0][1]: s += 0.10
+        # Extra: thumb tip above wrist level too
+        s = 0.45
+        s += 0.30 if lm[4][1] < lm[2][1] else 0.0
+        s += 0.15 if self._thumb_out(lm, hs) else 0.0
+        s += 0.10 if lm[4][1] < lm[0][1] else 0.0
         return min(s, 1.0)
 
     def _s_kapittha(self, lm, hs):
