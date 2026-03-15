@@ -71,6 +71,8 @@ def main():
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5,
     )
+    mp_selfie = mp.solutions.selfie_segmentation
+    selfie_seg = mp_selfie.SelfieSegmentation(model_selection=1)
     face_results = None
     # Visualization mode: 0=camera, 1=skeleton, 2=silhouette
     viz_mode = 0
@@ -120,6 +122,11 @@ def main():
             face_results = face_mesh.process(frame_rgb)
         else:
             face_results = None
+        # Run selfie segmentation in silhouette mode only
+        if viz_mode == 2:
+            seg_results = selfie_seg.process(frame_rgb)
+        else:
+            seg_results = None
         prev_pose_state = pose_state
         pose_state = pose_tracker.get_pose_state(
             pose_results, frame.shape[1], frame.shape[0])
@@ -234,38 +241,45 @@ def main():
                                (255, 255, 255), -1)
 
         elif viz_mode == 2:
-            # Silhouette mode — use pose landmarks to draw filled body shape
+            # Silhouette mode using MediaPipe Selfie Segmentation
             sil_frame = np.zeros_like(frame)
             mudra_color = MUDRA_THEMES.get(mudra, {}).get('color', (100, 255, 180)) if mudra != 'Unknown' else (60, 60, 60)
-            if pose_results and pose_results.pose_landmarks:
-                h2, w2 = frame.shape[:2]
-                lm_pose = pose_results.pose_landmarks.landmark
-                # Key body points to form silhouette polygon
-                body_idx = [11, 12, 14, 16, 13, 15, 23, 24, 26, 28, 25, 27]
-                body_pts = [(int(lm_pose[i].x * w2), int(lm_pose[i].y * h2))
-                            for i in body_idx
-                            if lm_pose[i].visibility > 0.4]
-                if len(body_pts) >= 3:
-                    hull = cv2.convexHull(np.array(body_pts, np.int32))
-                    # Filled silhouette
-                    ov = sil_frame.copy()
-                    cv2.fillPoly(ov, [hull], mudra_color)
-                    cv2.addWeighted(ov, 0.75, sil_frame, 0.25, 0, sil_frame)
-                    # Glowing outline
-                    ov2 = sil_frame.copy()
-                    cv2.polylines(ov2, [hull], True, mudra_color, 8)
-                    cv2.addWeighted(ov2, 0.40, sil_frame, 0.60, 0, sil_frame)
-                    cv2.polylines(sil_frame, [hull], True, (255, 255, 255), 1)
-            # Add hand points to silhouette
-            if results.multi_hand_landmarks:
-                h2, w2 = frame.shape[:2]
-                for hand_lm in results.multi_hand_landmarks:
-                    hand_pts = [(int(lm.x * w2), int(lm.y * h2))
-                                for lm in hand_lm.landmark]
-                    hull_h = cv2.convexHull(np.array(hand_pts, np.int32))
-                    ov = sil_frame.copy()
-                    cv2.fillPoly(ov, [hull_h], mudra_color)
-                    cv2.addWeighted(ov, 0.80, sil_frame, 0.20, 0, sil_frame)
+
+            if seg_results is not None and seg_results.segmentation_mask is not None:
+                # Get clean binary mask
+                mask = seg_results.segmentation_mask
+                condition = mask > 0.55
+                mask_uint8 = (condition * 255).astype(np.uint8)
+
+                # Soften mask edges
+                mask_blur = cv2.GaussianBlur(mask_uint8, (21, 21), 0)
+                mask_norm = mask_blur.astype(np.float32) / 255.0
+
+                # Fill silhouette with mudra color
+                colored = np.zeros_like(frame, dtype=np.float32)
+                for c in range(3):
+                    colored[:, :, c] = mudra_color[c] * mask_norm
+
+                # Outer glow — slightly expanded mask
+                mask_dilated = cv2.dilate(mask_uint8,
+                                          np.ones((25, 25), np.uint8),
+                                          iterations=2)
+                mask_glow = cv2.GaussianBlur(mask_dilated, (35, 35), 0)
+                mask_glow_norm = mask_glow.astype(np.float32) / 255.0
+                glow = np.zeros_like(frame, dtype=np.float32)
+                for c in range(3):
+                    glow[:, :, c] = mudra_color[c] * mask_glow_norm * 0.35
+
+                sil_frame = np.clip(glow + colored, 0, 255).astype(np.uint8)
+
+                # Bright edge outline
+                edges = cv2.Canny(mask_uint8, 50, 150)
+                edges_dilated = cv2.dilate(edges,
+                                           np.ones((2, 2), np.uint8),
+                                           iterations=1)
+                sil_frame[edges_dilated > 0] = tuple(
+                    min(255, int(c * 1.4)) for c in mudra_color)
+
             frame = sil_frame
         
         # Recognize mudras for each detected hand with proper handedness
