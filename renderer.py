@@ -10,27 +10,145 @@ from collections import deque
 # ─────────────────────────────────────────────────────
 
 class TrailSystem:
-    def __init__(self, maxlen=30):
+    def __init__(self, maxlen=55):
         self.points = deque(maxlen=maxlen)
+        self._sparks = []
 
     def update(self, x, y):
         self.points.append((x, y, time.time()))
+        # Spawn sparkles at current position
+        for _ in range(3):
+            angle = np.random.uniform(0, 2 * math.pi)
+            spd   = np.random.uniform(0.4, 2.2)
+            self._sparks.append({
+                'x':     float(x + np.random.randint(-6, 6)),
+                'y':     float(y + np.random.randint(-6, 6)),
+                'vx':    math.cos(angle) * spd,
+                'vy':    math.sin(angle) * spd - 0.8,
+                'life':  1.0,
+                'decay': np.random.uniform(0.04, 0.09),
+                'size':  np.random.randint(1, 4),
+            })
 
-    def draw(self, frame, color, thickness=2):
-        pts = list(self.points)
-        if len(pts) < 2:
-            return
+    def draw(self, frame, color, thickness=3):
         now = time.time()
-        for i in range(1, len(pts)):
-            age = now - pts[i][2]
-            alpha = max(0, 1.0 - age * 3.0)
-            if alpha <= 0:
+        pts = list(self.points)
+
+        # ── Curved trail using Bezier smoothing ──────
+        # Build smoothed curve through recent points
+        if len(pts) >= 3:
+            for i in range(1, len(pts) - 1):
+                age  = now - pts[i][2]
+                alpha = max(0.0, 1.0 - age * 1.2)
+                if alpha <= 0:
+                    continue
+
+                t = i / len(pts)  # 0=oldest 1=newest
+
+                # Smooth midpoint between neighbours
+                px0, py0 = pts[i-1][0], pts[i-1][1]
+                px1, py1 = pts[i][0],   pts[i][1]
+                px2, py2 = pts[i+1][0], pts[i+1][1]
+                mid_x = int((px0 + px2) / 2)
+                mid_y = int((py0 + py2) / 2)
+
+                # Width tapers — thick at tip, thin at tail
+                w = max(1, int(thickness * (0.3 + t * 1.4)))
+
+                # Gold color — bright at tip, deep at tail
+                gold_bright = (40,  210, 255)   # BGR bright gold
+                gold_deep   = (10,  140, 200)   # BGR deep gold
+                blend = t
+                gc = tuple(int(gold_deep[c] + blend *
+                               (gold_bright[c] - gold_deep[c]))
+                           for c in range(3))
+
+                # Outer wide glow
+                ov = frame.copy()
+                cv2.line(ov, (px0, py0), (mid_x, mid_y),
+                         gc, w + 8)
+                cv2.addWeighted(ov, alpha * 0.15,
+                                frame, 1 - alpha * 0.15,
+                                0, frame)
+
+                # Mid glow
+                ov = frame.copy()
+                cv2.line(ov, (px0, py0), (mid_x, mid_y),
+                         gc, w + 3)
+                cv2.addWeighted(ov, alpha * 0.30,
+                                frame, 1 - alpha * 0.30,
+                                0, frame)
+
+                # Bright core
+                ov = frame.copy()
+                cv2.line(ov, (px0, py0), (mid_x, mid_y),
+                         gc, w)
+                cv2.addWeighted(ov, alpha * 0.75,
+                                frame, 1 - alpha * 0.75,
+                                0, frame)
+
+                # White hot center line
+                if t > 0.65:
+                    cv2.line(frame, (px1, py1), (mid_x, mid_y),
+                             (255, 255, 255), max(1, w - 1))
+
+        # ── Sparkles ─────────────────────────────────
+        alive = []
+        for sp in self._sparks:
+            sp['x']  += sp['vx']
+            sp['vy'] += sp['vy']
+            sp['vy'] += 0.05   # gravity
+            sp['vx'] *= 0.96
+            sp['life'] -= sp['decay']
+            if sp['life'] <= 0:
                 continue
-            c = tuple(int(ch * alpha) for ch in color)
-            cv2.line(frame,
-                (pts[i-1][0], pts[i-1][1]),
-                (pts[i][0],   pts[i][1]),
-                c, thickness)
+            a = sp['life']
+            sx, sy = int(sp['x']), int(sp['y'])
+            h2, w2 = frame.shape[:2]
+            if not (0 <= sx < w2 and 0 <= sy < h2):
+                alive.append(sp)
+                continue
+
+            # Sparkle color — gold to white as it fades
+            sc = tuple(int(min(255, c * (0.7 + a * 0.3)))
+                       for c in (40, 200, 255))
+
+            # Sparkle glow
+            ov = frame.copy()
+            cv2.circle(ov, (sx, sy),
+                       sp['size'] + 2, sc, -1)
+            cv2.addWeighted(ov, a * 0.35,
+                            frame, 1 - a * 0.35,
+                            0, frame)
+
+            # Sparkle core
+            cv2.circle(frame, (sx, sy),
+                       sp['size'], sc, -1)
+
+            # Cross sparkle on larger ones
+            if sp['size'] >= 3 and a > 0.5:
+                cv2.line(frame,
+                         (sx - 4, sy), (sx + 4, sy),
+                         (255, 255, 255), 1)
+                cv2.line(frame,
+                         (sx, sy - 4), (sx, sy + 4),
+                         (255, 255, 255), 1)
+
+            alive.append(sp)
+        self._sparks = alive
+
+        # ── Bright tip burst at latest point ─────────
+        if pts:
+            rx, ry, rt = pts[-1]
+            age_tip = now - rt
+            if age_tip < 0.12:
+                ov = frame.copy()
+                cv2.circle(ov, (rx, ry), 12,
+                           (40, 210, 255), -1)
+                cv2.addWeighted(ov, 0.35,
+                                frame, 0.65, 0, frame)
+                cv2.circle(frame, (rx, ry), 4,
+                           (255, 255, 255), -1)
 
 
 # ─────────────────────────────────────────────────────
@@ -2348,14 +2466,35 @@ MUDRA_THEMES = {
 # MAIN RENDERER
 # ─────────────────────────────────────────────────────
 
+
+
+def compute_speed_scale(hand_speed):
+    """Convert hand speed in pixels/frame to
+    a scale multiplier for effects.
+    Slow/still = 0.6, normal = 1.0, fast = 1.8"""
+    if hand_speed < 2.0:
+        return 0.6
+    elif hand_speed < 8.0:
+        return 0.6 + (hand_speed - 2.0) / 6.0 * 0.4
+    elif hand_speed < 20.0:
+        return 1.0 + (hand_speed - 8.0) / 12.0 * 0.8
+    else:
+        return 1.8
+
+
 class MudraRenderer:
     def __init__(self, width=640, height=480):
         self.w = width
         self.h = height
         self.particles  = ParticleSystem(max_particles=200)
-        self.trail      = TrailSystem(maxlen=30)
+        self.trail_right = TrailSystem(maxlen=45)
+        self.trail_left  = TrailSystem(maxlen=45)
+        self.trail_left_arm  = TrailSystem(maxlen=20)
+        self.trail_right_arm = TrailSystem(maxlen=20)
         self.frame_count = 0
         self.second_hand_pos = None
+        self.pose_state  = None
+        self.hand_speed  = 0.0
 
     def _palm_center(self, landmarks):
         cx = int(landmarks[9][0] * self.w)
@@ -2369,12 +2508,17 @@ class MudraRenderer:
 
     def render(self, frame, mudra, score,
                landmarks, handedness='Right',
-               second_landmarks=None):
+               second_landmarks=None,
+               pose_state=None,
+               hand_speed=0.0):
         if not landmarks:
             self.particles.update_draw(frame)
             return frame
 
         self.frame_count += 1
+        self.pose_state  = pose_state
+        self.hand_speed  = hand_speed
+        speed_scale = compute_speed_scale(hand_speed)
         now = time.time()
 
         cx, cy  = self._palm_center(landmarks)
@@ -2387,14 +2531,23 @@ class MudraRenderer:
         else:
             self.second_hand_pos = None
 
-        self.trail.update(cx, cy)
+        _trail = self.trail_right if handedness == 'Right' else self.trail_left
+        _trail.update(cx, cy)
+        
+        # Get theme for arm trail color
+        theme = MUDRA_THEMES.get(mudra)
+        
+        # Update arm trails from pose
+        if self.pose_state:
+            trail_thickness = max(1, int(2 * speed_scale))
+            _trail_c = theme['trail_color'] if theme else (80, 80, 80)
 
         if mudra == 'Unknown' or score < 0.55:
-            self.trail.draw(frame, (100,100,100), 1)
+            _trail = self.trail_right if handedness == 'Right' else self.trail_left
+            _trail.draw(frame, (100,100,100), 1)
             self.particles.update_draw(frame)
             return frame
 
-        theme = MUDRA_THEMES.get(mudra)
         if not theme:
             self.particles.update_draw(frame)
             return frame
@@ -2408,10 +2561,11 @@ class MudraRenderer:
         t_color  = theme['trail_color']
 
         # LAYER 1 — Trail
-        self.trail.draw(frame, t_color, thickness=2)
+        _trail.draw(frame, t_color, thickness=3)
 
         # LAYER 2 — Glow
-        draw_glow(frame, cx, cy, radius, g_color)
+        glow_radius = int(radius * speed_scale)
+        draw_glow(frame, cx, cy, glow_radius, g_color)
 
         # LAYER 3 — Geometry dispatch
         if mudra == 'Ardhapataka' and \
@@ -2448,7 +2602,7 @@ class MudraRenderer:
         elif mudra == 'Hamsasya':
             pinch_x = int((landmarks[4][0]+landmarks[8][0])*0.5*self.w)
             pinch_y = int((landmarks[4][1]+landmarks[8][1])*0.5*self.h)
-            spd = self.body.hand_speed if hasattr(self,'body') else 0.0
+            spd = self.hand_speed
             geo_fn(frame, cx, cy, radius, color, now, pinch_x, pinch_y, spd)
 
         # ── NATURE GROUP — fingertip-anchored dispatch ──
@@ -2500,8 +2654,10 @@ class MudraRenderer:
 
         # LAYER 4 — Particles
         if self.frame_count % 2 == 0 and theme.get('p_count', 0) > 0:
+            scaled_count = max(1, int(p_count * speed_scale))
             self.particles.spawn(cx, cy, p_color, behavior,
-                                 speed_factor=0.8, count=p_count)
+                                 speed_factor=0.8 * speed_scale,
+                                 count=scaled_count)
         self.particles.update_draw(frame)
 
         # LAYER 5 — Fingertip dots

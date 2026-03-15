@@ -6,6 +6,7 @@ from mudra_recognizer import MudraRecognizer
 from visual_effects import VisualEffects
 from visual_engine import VisualEngine
 from renderer import MudraRenderer
+from pose_tracker import PoseTracker
 
 # Renderer handles visual effects for mudras
 DEFAULT_GLOW_COLOR = (180, 180, 180)
@@ -54,6 +55,10 @@ def main():
     visual_effects = VisualEffects()
     engine = VisualEngine(width=640, height=480)
     renderer = MudraRenderer(width=640, height=480)
+    pose_tracker = PoseTracker(use_lite=True)
+    pose_state = None
+    prev_pose_state = None
+    hand_speed = 0.0
     
     # Debug mode and freeze frame state
     debug_mode = False
@@ -89,6 +94,16 @@ def main():
         
         # Flip frame horizontally for mirror view
         frame = cv2.flip(frame, 1)
+        
+        # Run pose detection
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pose_results = pose_tracker.process(frame_rgb)
+        prev_pose_state = pose_state
+        pose_state = pose_tracker.get_pose_state(
+            pose_results, frame.shape[1], frame.shape[0])
+        hand_speed = pose_tracker.get_hand_speed(
+            pose_state, prev_pose_state,
+            frame.shape[1], frame.shape[0])
         
         # Find hands
         results = hand_tracker.find_hands(frame)
@@ -131,7 +146,9 @@ def main():
                 score,
                 hand_data[0][0],
                 hand_data[0][1],
-                second_landmarks=second_lm
+                second_landmarks=second_lm,
+                pose_state=pose_state,
+                hand_speed=hand_speed,
             )
         else:
             renderer.particles.update_draw(frame)

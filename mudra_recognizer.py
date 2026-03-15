@@ -14,8 +14,8 @@ class MudraRecognizer:
         self.right_history  = deque(maxlen=14)
         self.left_confirmed  = None
         self.right_confirmed = None
-        self.CONFIRM_THRESH  = 3
-        self.RELEASE_THRESH  = 5
+        self.CONFIRM_THRESH  = 4
+        self.RELEASE_THRESH  = 6
         self.display_scores_right = {}
         self.display_scores_left  = {}
         self.DISPLAY_ALPHA   = 0.15
@@ -131,6 +131,12 @@ class MudraRecognizer:
             lm[16][1] > lm[15][1],
             lm[20][1] > lm[19][1],
         ])
+        deep_droop = sum([
+            lm[8][1]  > lm[5][1],
+            lm[12][1] > lm[9][1],
+            lm[16][1] > lm[13][1],
+            lm[20][1] > lm[17][1],
+        ])
 
         groups = []
         flags = {
@@ -147,10 +153,10 @@ class MudraRecognizer:
         pinch_val = self._dist(lm[4], lm[8]) / hs
 
         index_family = (
-            ia_val < 158 and
-            ia_val > 85 and
-            self._extended(lm, 9, 10, 12, 128) and
-            self._extended(lm, 13, 14, 16, 128)
+            ia_val < 162 and
+            ia_val > 82 and
+            self._extended(lm, 9, 10, 12, 122) and
+            self._extended(lm, 13, 14, 16, 122)
         )
         if index_family:
             groups.append('index_family')
@@ -182,15 +188,15 @@ class MudraRecognizer:
         # ── OPEN HAND GROUPS ──────────────────────────
         # four_open: ALL fingers straight, thumb tucked
         # Only fires if ring is NOT bent (else Tripataka)
-        if fe and tt and droop < 2 and not ring_bent:
+        if fe and tt and droop < 2 and deep_droop < 2 and not ring_bent:
             groups.append('four_open')
 
         # all_open only fires if NOT tip_cluster or half_bent
-        if fe and to and droop < 2 and not tip_cluster and not all_half_bent:
+        if fe and to and droop < 2 and deep_droop < 2 and not tip_cluster and not all_half_bent:
             groups.append('all_open')
 
         # drooping: fingers extended but tips drooping
-        if fe and droop >= 2:
+        if fe and (droop >= 2 or deep_droop >= 2):
             groups.append('drooping')
 
         # ring_bent: 3 fingers up, ring bent (Tripataka/Trishula)
@@ -428,77 +434,52 @@ class MudraRecognizer:
         return min(s, 1.0)
 
     def _s_arala(self, lm, hs):
-        """Index curved. Thumb clearly NOT touching index.
-        Pinch > 0.15 means thumb is away from index."""
         ia = self._fangle(lm, 5, 6, 8)
         pinch = self._dist(lm[4], lm[8]) / hs
-        # Hard gate: index must be curved
-        if ia > 156 or ia < 105: return 0.0
-        # Hard gate: thumb must be away from index
-        # This is the key for Arala vs others
-        if pinch < 0.15: return 0.0
-        # Hard gate: middle and ring extended
-        if not self._extended(lm, 9, 10, 12, 132): return 0.0
-        if not self._extended(lm, 13, 14, 16, 132): return 0.0
+        if ia > 155 or ia < 95: return 0.0
+        if pinch < 0.16: return 0.0
+        if not self._extended(lm, 9, 10, 12, 128): return 0.0
+        if not self._extended(lm, 13, 14, 16, 128): return 0.0
+        if not self._extended(lm, 17, 18, 20, 122): return 0.0
         s = 0.0
-        s += 0.45 if 105 <= ia <= 156 else 0.0
-        s += 0.30 if pinch >= 0.16 else 0.15
-        s += 0.15 if self._extended(lm,9,10,12,148) else 0.08
-        s += 0.10 if self._extended(lm,13,14,16,148) else 0.05
+        s += 0.50 if 95 <= ia <= 155 else 0.0
+        s += 0.25 if pinch >= 0.18 else 0.15
+        s += 0.15 if self._extended(lm, 9, 10, 12, 142) else 0.08
+        s += 0.10 if self._extended(lm, 13, 14, 16, 142) else 0.05
         return min(s, 1.0)
 
     def _s_shukatunda(self, lm, hs):
-        """Parrot beak: tightest pinch of the 4.
-        Index most curved. Pinch < 0.12."""
         ia = self._fangle(lm, 5, 6, 8)
         pinch = self._dist(lm[4], lm[8]) / hs
-        # Hard gate: very tight pinch
-        if pinch > 0.12: return 0.0
-        # Hard gate: index curved
-        if ia > 128 or ia < 80: return 0.0
-        # Hard gate: middle extended
-        if not self._extended(lm, 9, 10, 12, 128): return 0.0
+        if pinch > 0.18: return 0.0
+        if ia > 135 or ia < 75: return 0.0
+        if not self._extended(lm, 9, 10, 12, 125): return 0.0
+        if self._extended(lm, 13, 14, 16, 158): return 0.0
         s = 0.0
-        # Reward tighter pinch
         if pinch < 0.09: s += 0.55
-        elif pinch < 0.12: s += 0.40
-        # Reward more curved index
+        elif pinch < 0.13: s += 0.45
+        elif pinch < 0.18: s += 0.35
         if ia < 100: s += 0.30
-        elif ia < 115: s += 0.22
-        elif ia < 128: s += 0.15
-        s += 0.15 if self._extended(lm,9,10,12,145) else 0.08
+        elif ia < 118: s += 0.22
+        elif ia < 135: s += 0.15
+        s += 0.15 if self._extended(lm, 9, 10, 12, 142) else 0.08
         return min(s, 1.0)
 
     def _s_mushti(self, lm, hs):
-        """Full fist. All 4 bent. Thumb tucked OVER fingers.
-        Thumb tip must be BELOW thumb MCP (not pointing up)."""
-        if not self._four_bent(lm, 108): return 0.0
+        if not self._four_bent(lm, 118): return 0.0
         if not self._thumb_tucked(lm, hs): return 0.0
-        # CRITICAL: thumb tip must NOT be above thumb MCP
-        # lm[4][1] < lm[2][1] means tip is higher = Shikhara
         if lm[4][1] < lm[2][1]: return 0.0
-        # If thumb tip is above thumb MCP it is Shikhara
-        if lm[4][1] < lm[2][1]: return 0.0
-        # If thumb is extended outward it is Shikhara
         if self._thumb_out(lm, hs): return 0.0
         s = 0.60
         s += 0.25 if self._thumb_tucked(lm, hs) else 0.0
-        if self._dist(lm[4], lm[5]) / hs < 0.28:
-            s += 0.15
+        if self._dist(lm[4], lm[5]) / hs < 0.30: s += 0.15
         return min(s, 1.0)
 
     def _s_shikhara(self, lm, hs):
-        """Fist with thumb pointing UP.
-        Thumb tip must be clearly ABOVE thumb MCP."""
-        if not self._four_bent(lm, 112): return 0.0
+        if not self._four_bent(lm, 118): return 0.0
         if not self._thumb_out(lm, hs): return 0.0
-        # CRITICAL: thumb tip must be above thumb MCP
         if not lm[4][1] < lm[2][1]: return 0.0
-        # Must have thumb clearly above MCP
-        if not lm[4][1] < lm[2][1]: return 0.0
-        # Must have thumb extended not tucked
         if self._thumb_tucked(lm, hs): return 0.0
-        # Extra: thumb tip above wrist level too
         s = 0.45
         s += 0.30 if lm[4][1] < lm[2][1] else 0.0
         s += 0.15 if self._thumb_out(lm, hs) else 0.0
@@ -606,8 +587,7 @@ class MudraRecognizer:
         return min(count * 0.20, 1.0)
 
     def _s_sarpashirsha(self, lm, hs):
-        """All 4 extended but tips DROOPING. Thumb tucked."""
-        if not self._four_ext(lm, 135): return 0.0
+        if not self._four_ext(lm, 138): return 0.0
         if not self._thumb_tucked(lm, hs): return 0.0
         droop = sum([
             lm[8][1]  > lm[7][1],
@@ -615,9 +595,16 @@ class MudraRecognizer:
             lm[16][1] > lm[15][1],
             lm[20][1] > lm[19][1],
         ])
-        if droop < 3: return 0.0
+        deep_droop = sum([
+            lm[8][1]  > lm[5][1],
+            lm[12][1] > lm[9][1],
+            lm[16][1] > lm[13][1],
+            lm[20][1] > lm[17][1],
+        ])
+        if droop < 2 and deep_droop < 1: return 0.0
         s = 0.30
-        s += 0.15 * droop
+        s += 0.12 * droop
+        s += 0.08 * deep_droop
         s += 0.10 if self._thumb_tucked(lm, hs) else 0.0
         return min(s, 1.0)
 
@@ -730,17 +717,17 @@ class MudraRecognizer:
         return min(s, 1.0)
 
     def _s_hamsapaksha(self, lm, hs):
-        """Sarpashirsha base + pinky straight. Thumb tucked."""
-        if not self._bent(lm, 5, 6, 8, 135): return 0.0
-        if not self._bent(lm, 9, 10, 12, 135): return 0.0
-        if not self._bent(lm, 13, 14, 16, 135): return 0.0
-        if not self._extended(lm, 17, 18, 20, 132): return 0.0
+        if not self._bent(lm, 5, 6, 8, 138): return 0.0
+        if not self._bent(lm, 9, 10, 12, 138): return 0.0
+        if not self._bent(lm, 13, 14, 16, 138): return 0.0
+        if not self._extended(lm, 17, 18, 20, 138): return 0.0
         if self._thumb_out(lm, hs): return 0.0
+        if lm[20][1] > lm[17][1]: return 0.0
         s = 0.0
-        s += 0.20 if self._bent(lm, 5, 6, 8, 125) else 0.10
-        s += 0.20 if self._bent(lm, 9, 10, 12, 125) else 0.10
-        s += 0.20 if self._bent(lm, 13, 14, 16, 125) else 0.10
-        s += 0.40 if self._extended(lm, 17, 18, 20, 142) else 0.20
+        s += 0.22 if self._bent(lm, 5, 6, 8, 125) else 0.10
+        s += 0.22 if self._bent(lm, 9, 10, 12, 125) else 0.10
+        s += 0.18 if self._bent(lm, 13, 14, 16, 125) else 0.09
+        s += 0.38 if self._extended(lm, 17, 18, 20, 148) else 0.18
         return min(s, 1.0)
 
     def _s_sandamsha(self, lm, hs):
@@ -965,6 +952,16 @@ class MudraRecognizer:
             if self._thumb_out(lm,hs): zero('Hamsapaksha')
             else: zero('Mrigashirsha')
 
+        # Sarpashirsha vs Hamsapaksha — deep droop decides
+        if scores.get('Sarpashirsha',0)>0.50 and scores.get('Hamsapaksha',0)>0.50:
+            deep_droop = sum([
+                lm[8][1]  > lm[5][1],
+                lm[12][1] > lm[9][1],
+                lm[16][1] > lm[13][1],
+            ])
+            if deep_droop >= 2: scores['Hamsapaksha'] = 0.0
+            else: scores['Sarpashirsha'] = 0.0
+
         # Shikhara vs Mushti — thumb up
         if scores.get('Shikhara',0)>0.40 or scores.get('Mushti',0)>0.40:
             if lm[4][1] < lm[2][1] and self._thumb_out(lm,hs):
@@ -988,8 +985,8 @@ class MudraRecognizer:
                 scores['Shukatunda'] = 0.0
 
         # Arala vs Pataka — index angle decides
-        if scores.get('Arala',0)>0.50 and scores.get('Pataka',0)>0.50:
-            if self._fangle(lm, 5, 6, 8) < 154:
+        if scores.get('Arala',0)>0.40 and scores.get('Pataka',0)>0.40:
+            if self._fangle(lm, 5, 6, 8) < 158:
                 scores['Pataka'] = 0.0
             else:
                 scores['Arala'] = 0.0
@@ -1031,9 +1028,16 @@ class MudraRecognizer:
                 scores['Chandrakala'] = 0.0
 
         # Hamsasya vs Katakamukha — ring+pinky
-        if scores.get('Hamsasya',0)>0.50 and scores.get('Katakamukha',0)>0.50:
-            if (self._extended(lm,13,14,16,132) and
-                self._extended(lm,17,18,20,132)):
+        if scores.get('Hamsasya',0)>0.40 and scores.get('Katakamukha',0)>0.40:
+            ring_ext = self._extended(lm, 13, 14, 16, 135)
+            pinky_ext = self._extended(lm, 17, 18, 20, 135)
+            pinch_tb = self._dist(lm[4], lm[8]) / hs
+            ia_tb = self._fangle(lm, 5, 6, 8)
+            if ring_ext and pinky_ext:
+                # Ring+pinky extended = Hamsasya
+                zero('Katakamukha')
+            elif pinch_tb < 0.13 and ia_tb < 122:
+                # Very tight pinch + curved index = Katakamukha
                 zero('Hamsasya')
             else:
                 zero('Katakamukha')
