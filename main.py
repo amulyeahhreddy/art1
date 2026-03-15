@@ -7,6 +7,7 @@ from hand_tracker import HandTracker
 from mudra_recognizer import MudraRecognizer
 from visual_effects import VisualEffects
 from visual_engine import VisualEngine
+from mandala_renderer import MandalaRenderer
 from renderer import MudraRenderer
 from pose_tracker import PoseTracker
 from renderer import MUDRA_THEMES
@@ -62,6 +63,14 @@ def main():
     pose_state = None
     prev_pose_state = None
     hand_speed = 0.0
+    mandala = MandalaRenderer(width=640, height=480)
+    last_mudra = None
+    prev_left_shoulder_x  = None
+    spin_cooldown          = 0
+    mandala_visible   = False
+    mandala_alpha     = 0.0
+    mandala_scale     = 0.8   # starts small, grows while spinning
+    mandala_expanding = False
     # Face mesh for skeleton mode
     mp_face = mp.solutions.face_mesh
     face_mesh = mp_face.FaceMesh(
@@ -111,6 +120,24 @@ def main():
         
         # Flip frame horizontally for mirror view
         frame = cv2.flip(frame, 1)
+
+        # Blend mandala into background BEFORE drawing anything on frame
+        if viz_mode == 0 and mandala_visible and mandala_alpha > 0:
+            mandala_layer = np.zeros_like(frame)
+            # Scale the mandala renderer radius by mandala_scale
+            orig_w = mandala.w
+            orig_h = mandala.h
+            mandala.w = int(640 * mandala_scale)
+            mandala.h = int(480 * mandala_scale)
+            mandala.render(mandala_layer)
+            mandala.w = orig_w
+            mandala.h = orig_h
+            cv2.addWeighted(mandala_layer, mandala_alpha,
+                            frame, 1.0 - mandala_alpha, 0, frame)
+        # Update mandala every frame
+        # Normalize hand speed to 0-1 for breathing
+        movement_energy = min(hand_speed / 25.0, 1.0)
+        mandala.update(movement_energy=movement_energy)
         # Store clean frame for skeleton/silhouette modes
         clean_frame = frame.copy()
         
@@ -133,6 +160,36 @@ def main():
         hand_speed = pose_tracker.get_hand_speed(
             pose_state, prev_pose_state,
             frame.shape[1], frame.shape[0])
+        # Spin detection — left shoulder crossing right shoulder
+        if pose_state and prev_pose_state:
+            ls_x = pose_state.get('left_shoulder', (0,0,0))[0]
+            rs_x = pose_state.get('right_shoulder', (0,0,0))[0]
+            prev_ls_x = prev_pose_state.get('left_shoulder', (0,0,0))[0]
+            if spin_cooldown <= 0:
+                if prev_ls_x > rs_x and ls_x <= rs_x:
+                    mandala.add_spin(0.25)
+                    mandala_visible   = True
+                    mandala_expanding = True
+                    mandala_alpha     = 0.0
+                    mandala_scale     = 0.8
+                    spin_cooldown     = 15
+                    print("Spin detected!")
+            else:
+                spin_cooldown -= 1
+
+        # Animate mandala alpha
+        if mandala_visible:
+            if mandala_expanding:
+                mandala_alpha = min(mandala_alpha + 0.03, 0.75)
+                mandala_scale = min(mandala_scale + 0.020, 1.6)
+                if mandala_alpha >= 0.45:
+                    mandala_expanding = False
+            else:
+                mandala_alpha = max(mandala_alpha - 0.008, 0.0)
+                mandala_scale = max(mandala_scale - 0.005, 0.0)
+                if mandala_alpha <= 0.0:
+                    mandala_visible = False
+                    mandala_scale   = 0.8
         
         # Find hands
         results = hand_tracker.find_hands(frame)
@@ -302,6 +359,11 @@ def main():
                     hand_data[0][0], hand_data[0][1])
         else:  # 2 hands
             mudra, score = mudra_recognizer.recognize_two_hand(hand_data[0], hand_data[1])
+        
+        # Update mandala pattern when mudra changes
+        if mudra != last_mudra and mudra != 'Unknown':
+            mandala.set_mudra(mudra)
+            last_mudra = mudra
         
         # Draw mudra visual effects using new renderer
         if hand_data:
