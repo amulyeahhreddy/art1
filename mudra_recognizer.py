@@ -4,1270 +4,982 @@ from collections import deque, Counter
 
 
 class MudraRecognizer:
+
+    # ─────────────────────────────────────────
+    # INIT
+    # ─────────────────────────────────────────
+
     def __init__(self):
-        # Temporal smoothing buffers for each hand (7-frame history)
-        self.left_hand_history = deque(maxlen=7)
-        self.right_hand_history = deque(maxlen=7)
-        self.debug_mode = False
-        
-        # Hysteresis state for preventing flickering
-        self.left_confirmed = None
+        self.left_history   = deque(maxlen=10)
+        self.right_history  = deque(maxlen=10)
+        self.left_confirmed  = None
         self.right_confirmed = None
-        
-        # Store last features for debugging
-        self.last_features = {}
-        self.last_confidence = 0.0
-        
-        # Display score smoothing buffers (separate from recognition logic)
+        self.CONFIRM_THRESH  = 3
+        self.RELEASE_THRESH  = 2
         self.display_scores_right = {}
         self.display_scores_left  = {}
-        self.DISPLAY_ALPHA = 0.15  # smoothing factor (lower = smoother)
-        
-        # Samyuktha hastas toggle
-        self.samyuktha_enabled = False  # enable when body landmarks added
-        
-        # Initialize mudra groups mapping
-        self._init_mudra_groups()
-    
-    # ==================== HELPER FUNCTIONS ====================
-    
+        self.DISPLAY_ALPHA   = 0.15
+        self.samyuktha_enabled = False
+        self.debug_mode      = False
+
+    # ─────────────────────────────────────────
+    # HELPERS
+    # ─────────────────────────────────────────
+
     def _dist(self, p1, p2):
-        """Euclidean distance using x,y only (ignore z unless specified)"""
         return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
-    
+
     def _hand_size(self, lm):
-        """Normalize factor = wrist(0) to middle MCP(9) distance"""
-        # If result < 0.01, return 0.01 to avoid division by zero
         return max(self._dist(lm[0], lm[9]), 0.01)
-    
+
     def _angle(self, a, b, c):
-        """Angle in degrees at point b, formed by vectors (b->a) and (b->c)"""
-        # Vector from b to a
-        v1 = [a[0] - b[0], a[1] - b[1]]
-        # Vector from b to c
-        v2 = [c[0] - b[0], c[1] - b[1]]
-        
-        # Calculate magnitudes
-        mag1 = math.sqrt(v1[0]**2 + v1[1]**2)
-        mag2 = math.sqrt(v2[0]**2 + v2[1]**2)
-        
-        if mag1 == 0 or mag2 == 0:
-            return 180.0  # Default to extended
-        
-        # Calculate dot product
-        dot_product = v1[0] * v2[0] + v1[1] * v2[1]
-        
-        # Calculate angle in degrees
-        cos_angle = dot_product / (mag1 * mag2)
-        cos_angle = max(-1, min(1, cos_angle))  # Clamp to [-1, 1]
-        angle = math.degrees(math.acos(cos_angle))
-        
-        return angle
-    
-    def _finger_angle(self, lm, mcp, pip, tip):
-        """Returns angle at pip joint"""
-        return self._angle(lm[mcp], lm[pip], lm[tip])
-    
-    def _is_extended(self, lm, mcp, pip, tip, threshold=150):
-        """Check if finger is extended above threshold"""
-        return self._finger_angle(lm, mcp, pip, tip) > threshold
-    
-    def _is_bent(self, lm, mcp, pip, tip, threshold=120):
-        """Check if finger is bent below threshold"""
-        return self._finger_angle(lm, mcp, pip, tip) < threshold
-    
-    def _is_half_bent(self, lm, mcp, pip, tip):
-        """Check if finger is half-bent (120-150 degrees)"""
-        angle = self._finger_angle(lm, mcp, pip, tip)
-        return 120 <= angle <= 150
-    
-    def _thumb_tucked(self, lm, hs):
-        """Thumb tip(4) is close to index MCP(5) — thumb folded INTO palm"""
-        return self._dist(lm[4], lm[5]) / hs < 0.35
-    
-    def _thumb_extended(self, lm, hs):
-        """Thumb tip(4) is far from index MCP(5)"""
-        return self._dist(lm[4], lm[5]) / hs > 0.45
-    
-    def _tips_touching(self, lm, tip1, tip2, hs, threshold=0.12):
-        """Check if two fingertips are touching"""
-        return self._dist(lm[tip1], lm[tip2]) / hs < threshold
-    
-    def _spread(self, lm, mcp1, mcp2, hs):
-        """Normalized spread between two finger MCPs"""
-        return self._dist(lm[mcp1], lm[mcp2]) / hs
-    
-    def _all_four_extended(self, lm, threshold=148):
-        """Check if all four fingers are extended"""
-        return all([
-            self._is_extended(lm, 5, 6, 8, threshold),   # Index
-            self._is_extended(lm, 9, 10, 12, threshold), # Middle
-            self._is_extended(lm, 13, 14, 16, threshold), # Ring
-            self._is_extended(lm, 17, 18, 20, threshold)  # Pinky
-        ])
-    
-    def _all_four_bent(self, lm, threshold=120):
-        """Check if all four fingers are bent"""
-        return all([
-            self._is_bent(lm, 5, 6, 8, threshold),   # Index
-            self._is_bent(lm, 9, 10, 12, threshold), # Middle
-            self._is_bent(lm, 13, 14, 16, threshold), # Ring
-            self._is_bent(lm, 17, 18, 20, threshold)  # Pinky
-        ])
-    
-    def _normalize_hand(self, lm, handedness):
-        """Mirror left hand: replace each x with (1.0 - x)"""
-        if handedness == 'Left':
-            lm = [(1.0 - p[0], p[1], p[2]) for p in lm]
-        return lm
-    
-    # Helper function aliases for compatibility with user's requested naming
-    def _touching(self, lm, tip1, tip2, hs, threshold=0.12):
-        """Alias for _tips_touching"""
-        return self._tips_touching(lm, tip1, tip2, hs, threshold)
-    
-    def _extended(self, lm, mcp, pip, tip, threshold=150):
-        """Alias for _is_extended"""
-        return self._is_extended(lm, mcp, pip, tip, threshold)
-    
-    def _bent(self, lm, mcp, pip, tip, threshold=120):
-        """Alias for _is_bent"""
-        return self._is_bent(lm, mcp, pip, tip, threshold)
-    
-    def _four_ext(self, lm, threshold=148):
-        """Alias for _all_four_extended"""
-        return self._all_four_extended(lm, threshold)
-    
-    def _four_bent(self, lm, threshold=120):
-        """Alias for _all_four_bent"""
-        return self._all_four_bent(lm, threshold)
-    
-    def _thumb_out(self, lm, hs):
-        """Alias for _thumb_extended"""
-        return self._thumb_extended(lm, hs)
-    
+        v1 = [a[0]-b[0], a[1]-b[1]]
+        v2 = [c[0]-b[0], c[1]-b[1]]
+        m1 = math.sqrt(v1[0]**2+v1[1]**2)
+        m2 = math.sqrt(v2[0]**2+v2[1]**2)
+        if m1 < 1e-6 or m2 < 1e-6:
+            return 180.0
+        dot = v1[0]*v2[0]+v1[1]*v2[1]
+        cos_a = max(-1.0, min(1.0, dot/(m1*m2)))
+        return math.degrees(math.acos(cos_a))
+
     def _fangle(self, lm, mcp, pip, tip):
-        """Alias for _finger_angle"""
-        return self._finger_angle(lm, mcp, pip, tip)
-    
+        return self._angle(lm[mcp], lm[pip], lm[tip])
+
+    def _extended(self, lm, mcp, pip, tip, t=148):
+        return self._fangle(lm, mcp, pip, tip) > t
+
+    def _bent(self, lm, mcp, pip, tip, t=125):
+        return self._fangle(lm, mcp, pip, tip) < t
+
+    def _touching(self, lm, i, j, hs, thresh=0.13):
+        return self._dist(lm[i], lm[j]) / hs < thresh
+
+    def _spread(self, lm, i, j, hs):
+        return self._dist(lm[i], lm[j]) / hs
+
+    def _four_ext(self, lm, t=145):
+        return (self._extended(lm,5,6,8,t) and
+                self._extended(lm,9,10,12,t) and
+                self._extended(lm,13,14,16,t) and
+                self._extended(lm,17,18,20,t))
+
+    def _four_bent(self, lm, t=120):
+        return (self._bent(lm,5,6,8,t) and
+                self._bent(lm,9,10,12,t) and
+                self._bent(lm,13,14,16,t) and
+                self._bent(lm,17,18,20,t))
+
+    def _thumb_out(self, lm, hs):
+        return self._dist(lm[4], lm[5]) / hs > 0.35
+
+    def _thumb_tucked(self, lm, hs):
+        return self._dist(lm[4], lm[5]) / hs < 0.38
+
     def _normalize(self, lm, handedness):
-        """Alias for _normalize_hand"""
-        return self._normalize_hand(lm, handedness)
-    
-    def _get_finger_angles(self, lm):
-        """Return dict: {thumb, index, middle, ring, pinky} angles"""
+        # Mirror left hand only. NO rotation.
+        if handedness == 'Left':
+            lm = [(1.0-p[0], p[1], p[2]) for p in lm]
+        return lm
+
+    def _finger_angles(self, lm):
         return {
-            'thumb': self._finger_angle(lm, 1, 2, 4),
-            'index': self._finger_angle(lm, 5, 6, 8),
-            'middle': self._finger_angle(lm, 9, 10, 12),
-            'ring': self._finger_angle(lm, 13, 14, 16),
-            'pinky': self._finger_angle(lm, 17, 18, 20)
+            'thumb':  self._fangle(lm,1,2,4),
+            'index':  self._fangle(lm,5,6,8),
+            'middle': self._fangle(lm,9,10,12),
+            'ring':   self._fangle(lm,13,14,16),
+            'pinky':  self._fangle(lm,17,18,20),
         }
-    
-    # ==================== STAGE 1: PRE-FILTER GROUPS ====================
-    
-    def _get_stage1_groups(self, lm, hs):
-        """Compute boolean flags first (cheap operations)"""
-        four_ext = self._all_four_extended(lm, 148)
-        four_bent = self._all_four_bent(lm, 120)
-        thumb_ext = self._thumb_extended(lm, hs)
-        thumb_tuck = self._thumb_tucked(lm, hs)
-        pinch_14 = self._tips_touching(lm, 4, 8, hs, 0.15)  # thumb-index
-        idx_ext = self._is_extended(lm, 5, 6, 8)
-        mid_ext = self._is_extended(lm, 9, 10, 12)
-        ring_ext = self._is_extended(lm, 13, 14, 16)
-        pink_ext = self._is_extended(lm, 17, 18, 20)
-        ext_count = sum([idx_ext, mid_ext, ring_ext, pink_ext])
-        
-        groups = []
-        
-        if four_ext and thumb_ext:
-            groups.append('all_open')
-        if four_ext and thumb_tuck:
-            groups.append('four_open')
-        if four_bent:
-            groups.append('fist')
-        if pinch_14:
-            groups.append('pinch')
-        if ext_count == 1:
-            groups.append('one_up')
-        if ext_count == 2:
-            groups.append('two_up')
-        if ext_count == 3:
-            groups.append('three_up')
-        if not groups:
-            groups.append('mixed')
-            
-        return groups, {
-            'four_ext': four_ext, 'four_bent': four_bent,
-            'thumb_ext': thumb_ext, 'thumb_tuck': thumb_tuck,
-            'pinch_14': pinch_14, 'ext_count': ext_count
-        }
-    
-    # ==================== STAGE 2: MUDRA SCORING FUNCTIONS ====================
-    
-    def _score_pataka(self, lm, hs):
-        """
-        Pataka: ALL 4 fingers fully extended, held TOGETHER (low spread),
-        thumb TUCKED across palm (NOT open/extended)
-        THE OLD WRONG DEFINITION "all 5 fingers open" IS ABOLISHED.
-        """
-        score = 0.0
-        if self._all_four_extended(lm, 152):
-            score += 0.35
-        if self._thumb_tucked(lm, hs):
-            score += 0.35
-        if self._spread(lm, 5, 17, hs) < 0.55:  # fingers together
-            score += 0.15
-        if self._spread(lm, 5, 17, hs) < 0.42:  # bonus: very tight
-            score += 0.15
-        return min(score, 1.0)
-    
-    def _score_alapadma(self, lm, hs):
-        """
-        Alapadma: ALL 5 fingers fully extended AND maximally spread
-        apart like a blooming lotus / open fan
-        """
-        score = 0.0
-        if self._all_four_extended(lm, 148) and self._is_extended(lm, 1, 2, 4, 140):
-            score += 0.40
-        
-        # Calculate average spread of adjacent MCP pairs
-        spreads = [
-            self._spread(lm, 1, 5, hs),   # thumb-index
-            self._spread(lm, 5, 9, hs),   # index-middle
-            self._spread(lm, 9, 13, hs),  # middle-ring
-            self._spread(lm, 13, 17, hs)  # ring-pinky
-        ]
-        avg_spread = sum(spreads) / len(spreads)
-        
-        if avg_spread > 0.18:
-            score += 0.25
-        if avg_spread > 0.22:  # bonus
-            score += 0.15
-        if self._spread(lm, 5, 17, hs) > 0.60:  # total spread
-            score += 0.20
-        return min(score, 1.0)
-    
-    def _score_mushti(self, lm, hs):
-        """Full tight fist. ALL 4 fingers bent tight AND thumb 
-        bent/tucked OVER fingers. No part of thumb extended upward."""
-        s = 0.0
-        # Four fingers must be tightly bent
-        if self._four_bent(lm, 105):          s += 0.50
-        # Thumb must be tucked/bent over fingers (not pointing up)
-        if self._thumb_tucked(lm, hs):        s += 0.35
-        # HARD PENALTY: if thumb tip is above thumb MCP, it is 
-        # pointing up = Shikhara not Mushti. Subtract heavily.
-        if lm[4][1] < lm[2][1]:              s -= 0.40
-        # Extra confirmation: thumb tip should be near index MCP area
-        if self._dist(lm[4], lm[5]) / hs < 0.30:  s += 0.15
-        return max(min(s, 1.0), 0.0)
-    
-    def _score_shikhara(self, lm, hs):
-        """Fist with thumb pointing straight UP away from fingers.
-        Thumb tip must be clearly ABOVE thumb MCP in image coords."""
-        s = 0.0
-        # Four fingers must be in fist
-        if self._four_bent(lm, 110):          s += 0.45
-        # Thumb must be extended outward (not tucked)
-        if self._thumb_out(lm, hs):           s += 0.25
-        # CRITICAL: thumb tip must be ABOVE thumb MCP 
-        # In image coords: lower Y value = higher on screen
-        if lm[4][1] < lm[2][1]:              s += 0.30
-        # Bonus: thumb tip well above wrist level
-        if lm[4][1] < lm[0][1]:              s += 0.10
-        # HARD PENALTY: if thumb is tucked, it cannot be Shikhara
-        if self._thumb_tucked(lm, hs):        s -= 0.50
-        return max(min(s, 1.0), 0.0)
-    
-    def _score_mayura(self, lm, hs):
-        """Peacock: Thumb+Index tips touching, middle half-extended,
-        ring+pinky bent back."""
-        s = 0.0
-        if self._tips_touching(lm, 4, 8, hs, 0.13):     s += 0.45
-        ma = self._finger_angle(lm, 9, 10, 12)
-        if 125 <= ma <= 158:                         s += 0.25
-        if self._is_bent(lm, 13, 14, 16):              s += 0.15
-        if self._is_bent(lm, 17, 18, 20):              s += 0.15
-        return min(s, 1.0)
-    
-    def _score_ardhachandra(self, lm, hs):
-        """Half Moon: All 5 extended, MODERATE spread.
-        More spread than Pataka, less than Alapadma."""
-        s = 0.0
-        if self._all_four_extended(lm, 145):                  s += 0.30
-        if self._is_extended(lm, 1, 2, 4, 135):         s += 0.15
-        sp = self._spread(lm, 5, 17, hs)
-        if 0.40 <= sp <= 0.65:                        s += 0.35
-        import numpy as np
-        avg = np.mean([
-            self._spread(lm, 5, 9, hs),
-            self._spread(lm, 9, 13, hs),
-            self._spread(lm, 13, 17, hs),
-        ])
-        if 0.13 <= avg <= 0.22:                       s += 0.20
-        return min(s, 1.0)
-    
-    def _score_arala(self, lm, hs):
-        """Bent Index: Index half-bent/curved (120-155°), 
-        middle+ring+pinky straight, thumb extended out."""
-        s = 0.0
-        ia = self._finger_angle(lm, 5, 6, 8)
-        if 120 <= ia <= 155:                          s += 0.35
-        if self._is_extended(lm, 9, 10, 12, 155):       s += 0.20
-        if self._is_extended(lm, 13, 14, 16, 155):      s += 0.20
-        if self._is_extended(lm, 17, 18, 20, 155):      s += 0.10
-        if self._thumb_extended(lm, hs):                   s += 0.15
-        return min(s, 1.0)
-    
-    def _score_shukatunda(self, lm, hs):
-        """Parrot Beak: Index extended, middle half-bent, 
-        ring+pinky tightly bent, thumb tip near middle DIP."""
-        s = 0.0
-        if self._is_extended(lm, 5, 6, 8, 160):        s += 0.30
-        ma = self._finger_angle(lm, 9, 10, 12)
-        if 125 <= ma <= 162:                          s += 0.20
-        if self._is_bent(lm, 13, 14, 16, 115):          s += 0.20
-        if self._is_bent(lm, 17, 18, 20, 115):          s += 0.15
-        if self._dist(lm[4], lm[11]) / hs < 0.25:   s += 0.15
-        return min(s, 1.0)
-    
-    def _score_kapittha(self, lm, hs):
-        """Apple Hold: Index+Middle curled 85-135°, 
-        thumb near fingertips, ring+pinky bent."""
-        s = 0.0
-        ia = self._finger_angle(lm, 5, 6, 8)
-        ma = self._finger_angle(lm, 9, 10, 12)
-        if 85 <= ia <= 135:                           s += 0.25
-        if 85 <= ma <= 135:                           s += 0.25
-        if self._dist(lm[4], lm[8]) / hs < 0.20:    s += 0.25
-        if self._is_bent(lm, 13, 14, 16):               s += 0.15
-        if self._is_bent(lm, 17, 18, 20):               s += 0.10
-        return min(s, 1.0)
-    
-    def _score_katakamukha(self, lm, hs):
-        """Bracelet: Thumb+Index+Middle tips triangle, ring+pinky extended."""
-        s = 0.0
-        if self._dist(lm[4], lm[8]) / hs  < 0.15:  s += 0.20
-        if self._dist(lm[8], lm[12]) / hs < 0.15:  s += 0.15
-        if self._dist(lm[4], lm[12]) / hs < 0.15:  s += 0.15
-        if self._is_extended(lm, 13, 14, 16, 145):      s += 0.25
-        if self._is_extended(lm, 17, 18, 20, 145):      s += 0.25
-        return min(s, 1.0)
-    
-    def _score_suchi(self, lm, hs):
-        """Needle: Index pointing, ALL others tightly bent, thumb tucked."""
-        s = 0.0
-        if self._is_extended(lm, 5, 6, 8, 162):        s += 0.35
-        if self._is_bent(lm, 9, 10, 12, 110):          s += 0.20
-        if self._is_bent(lm, 13, 14, 16, 110):         s += 0.20
-        if self._is_bent(lm, 17, 18, 20, 110):         s += 0.15
-        if self._thumb_tucked(lm, hs):               s += 0.10
-        return min(s, 1.0)
-    
-    def _score_chandrakala(self, lm, hs):
-        """Crescent: Thumb+Index C-shape (tips 0.13-0.30 apart), 
-        all other fingers fully bent."""
-        s = 0.0
-        d = self._dist(lm[4], lm[8]) / hs
-        if 0.13 <= d <= 0.30:                        s += 0.50
-        if self._is_bent(lm, 9, 10, 12, 115):          s += 0.20
-        if self._is_bent(lm, 13, 14, 16, 115):         s += 0.20
-        if self._is_bent(lm, 17, 18, 20, 115):         s += 0.10
-        return min(s, 1.0)
-    
-    def _score_padmakosha(self, lm, hs):
-        """Lotus Cup: All 5 fingers half-bent (110-152°) like holding a ball."""
-        angles = [
-            self._finger_angle(lm, 5, 6, 8),
-            self._finger_angle(lm, 9, 10, 12),
-            self._finger_angle(lm, 13, 14, 16),
-            self._finger_angle(lm, 17, 18, 20),
-        ]
-        count = sum(1 for a in angles if 110 <= a <= 152)
-        ta = self._finger_angle(lm, 1, 2, 4)
-        thumb_half = 1 if 100 <= ta <= 155 else 0
-        return min((count + thumb_half) * 0.18, 1.0)
-    
-    def _score_sarpashirsha(self, lm, hs):
-        """Snake Head: 4 fingers extended but tips DROOPING downward.
-        Tip Y must be greater than DIP Y (drooping in image coords)."""
-        s = 0.0
-        if self._all_four_extended(lm, 145):                  s += 0.40
+
+    # ─────────────────────────────────────────
+    # STAGE 1 — PRE-FILTER GROUPS
+    # ─────────────────────────────────────────
+
+    def _get_groups(self, lm, hs):
+        fe  = self._four_ext(lm, 142)
+        fb  = self._four_bent(lm, 118)
+        to  = self._thumb_out(lm, hs)
+        tt  = self._thumb_tucked(lm, hs)
+        p48 = self._touching(lm, 4, 8, hs, 0.16)   # thumb-index pinch
+        ie  = self._extended(lm, 5, 6, 8, 138)
+        me  = self._extended(lm, 9, 10, 12, 138)
+        re  = self._extended(lm, 13, 14, 16, 138)
+        pe  = self._extended(lm, 17, 18, 20, 138)
+        ec  = sum([ie, me, re, pe])
+        ring_bent = not re  # ring finger is bent if not extended
+
+        # drooping: tip y > DIP y
         droop = sum([
             lm[8][1]  > lm[7][1],
             lm[12][1] > lm[11][1],
             lm[16][1] > lm[15][1],
             lm[20][1] > lm[19][1],
         ])
-        s += 0.15 * droop
-        if self._thumb_tucked(lm, hs):               s += 0.10
-        if droop < 2:                                 s *= 0.4
+
+        groups = []
+        flags  = {
+            'four_ext':fe,'four_bent':fb,
+            'thumb_ext':to,'thumb_tuck':tt,
+            'pinch_14':p48,'ext_count':ec,'droop':droop
+        }
+
+        if fe and to and droop < 2:    groups.append('all_open')
+        if fe and tt and droop < 2 and not ring_bent:
+            groups.append('four_open')
+        if fe and droop >= 2:          groups.append('drooping')
+        if fb:                         groups.append('fist')
+        # Ring-thumb touch = Mayura territory
+        p416 = self._touching(lm, 4, 16, hs, 0.20)
+        if p416:
+            groups.append('ring_pinch')
+        
+        if p48:                        groups.append('pinch')
+        if ec == 1:                    groups.append('one_up')
+        if ec == 2:                    groups.append('two_up')
+        if ec == 3:                    groups.append('three_up')
+        
+        # Ring bent but index+middle+pinky extended = Tripataka territory
+        ring_bent = self._fangle(lm, 13, 14, 16) < 158
+        if ring_bent:
+            groups.append('ring_bent')
+
+        # Index+middle up only (not pinky) = Ardhapataka
+        idx_mid_only = (ie and me and not re and not pe)
+        if idx_mid_only:
+            groups.append('idx_mid_up')
+        
+        # Index+Middle both extended AND spread = Kartarimukha
+        idx_mid_spread = (ie and me and not re and not pe and
+                          self._spread(lm, 5, 9, hs) > 0.15)
+        if idx_mid_spread:
+            groups.append('idx_mid_spread')
+
+        me_strict = self._extended(lm, 9, 10, 12, 148)
+        idx_pinky_up = (ie and not me_strict and not re and pe)
+        if idx_pinky_up:
+            groups.append('idx_pinky_up')
+        
+        # Index curved but others straight = Arala territory
+        idx_curved = (self._fangle(lm, 5, 6, 8) < 158 and
+                      self._fangle(lm, 5, 6, 8) > 105 and
+                      self._extended(lm, 9, 10, 12, 138) and
+                      self._extended(lm, 13, 14, 16, 138))
+        if idx_curved:
+            groups.append('idx_curved')
+        
+        # Index up + thumb out = Chandrakala territory
+        idx_up_thumb_out = (ie and not me and not re
+                            and not pe and to)
+        if idx_up_thumb_out:
+            groups.append('idx_up_thumb_out')
+
+        # Index up + thumb tucked = Suchi territory
+        idx_up_thumb_in = (ie and not me and not re
+                           and not pe and tt)
+        if idx_up_thumb_in:
+            groups.append('idx_up_thumb_in')
+        
+        # Three middle fingers bent + pinky up = Mrigashirsha/Hamsapaksha
+        three_mid_bent_pinky_up = (
+            self._bent(lm, 5, 6, 8, 135) and
+            self._bent(lm, 9, 10, 12, 135) and
+            self._bent(lm, 13, 14, 16, 135) and
+            self._extended(lm, 17, 18, 20, 132)
+        )
+        if three_mid_bent_pinky_up:
+            groups.append('three_mid_bent_pinky_up')
+        
+        flags.update({
+            'ring_bent': ring_bent,
+            'idx_mid_only': idx_mid_only,
+        })
+        
+        if not groups:                 groups.append('mixed')
+
+        return groups, flags
+
+    GROUPS = {
+        'all_open':              ['Alapadma', 'Ardhachandra', 'Arala'],
+        'four_open':             ['Pataka', 'Tripataka'],
+        'ring_bent':             ['Tripataka', 'Trishula'],
+        'idx_mid_up':            ['Ardhapataka'],
+        'idx_mid_spread':        ['Kartarimukha'],
+        'idx_pinky_up':          ['Simhamukha'],
+        'idx_curved':            ['Arala', 'Shukatunda'],
+        'idx_up_thumb_out':      ['Chandrakala'],
+        'idx_up_thumb_in':       ['Suchi'],
+        'three_mid_bent_pinky_up':['Mrigashirsha', 'Hamsapaksha'],
+        'drooping':              ['Sarpashirsha'],
+        'fist':                  ['Mushti', 'Shikhara',
+                                  'Tamrachuda', 'Kapittha'],
+        'pinch':                 ['Hamsasya', 'Sandamsha', 'Mukula',
+                                  'Katakamukha', 'Chandrakala'],
+        'ring_pinch':            ['Mayura'],
+        'three_up':              ['Chatura'],
+        'mixed':                 ['Shukatunda', 'Bhramara',
+                                  'Padmakosha', 'Kangula'],
+    }
+
+    # ─────────────────────────────────────────
+    # STAGE 2 — SCORING FUNCTIONS
+    # Each returns 0.0–1.0
+    # Hard gates at top: return 0.0 if key condition missing
+    # ─────────────────────────────────────────
+
+    def _s_pataka(self, lm, hs):
+        """All 4 fingers very straight together. Thumb TUCKED."""
+        # Hard gate: ALL fingers must be very straight
+        if self._fangle(lm, 5, 6, 8) < 155:   return 0.0
+        if self._fangle(lm, 9, 10, 12) < 155:  return 0.0
+        if self._fangle(lm, 13, 14, 16) < 155: return 0.0
+        if self._fangle(lm, 17, 18, 20) < 155: return 0.0
+        if not self._thumb_tucked(lm, hs):      return 0.0
+        sp = self._spread(lm, 5, 17, hs)
+        if sp > 0.58:                           return 0.0
+        s = 0.70
+        if sp < 0.42: s += 0.30
+        elif sp < 0.58: s += 0.15
         return min(s, 1.0)
-    
-    def _score_mrigashirsha(self, lm, hs):
-        """Deer Head: Index+Pinky extended (horns), Middle+Ring bent."""
-        s = 0.0
-        if self._is_extended(lm, 5, 6, 8, 148):        s += 0.30
-        if self._is_extended(lm, 17, 18, 20, 148):     s += 0.30
-        if self._is_bent(lm, 9, 10, 12):               s += 0.20
-        if self._is_bent(lm, 13, 14, 16):              s += 0.20
+
+    def _s_alapadma(self, lm, hs):
+        """All 5 extended AND maximally spread."""
+        if not self._four_ext(lm, 145): return 0.0
+        if not self._extended(lm, 1, 2, 4, 138): return 0.0
+        spreads = [
+            self._spread(lm, 1, 5, hs),
+            self._spread(lm, 5, 9, hs),
+            self._spread(lm, 9, 13, hs),
+            self._spread(lm, 13, 17, hs),
+        ]
+        avg = sum(spreads)/4
+        total = self._spread(lm, 5, 17, hs)
+        if avg < 0.15: return 0.0
+        s = 0.30
+        if avg > 0.20: s += 0.30
+        if avg > 0.25: s += 0.15
+        if total > 0.58: s += 0.25
         return min(s, 1.0)
-    
-    def _score_simhamukha(self, lm, hs):
-        """Lion Face: Thumb+Index+Pinky extended, Middle+Ring bent."""
-        s = 0.0
-        if self._thumb_extended(lm, hs):                  s += 0.20
-        if self._is_extended(lm, 5, 6, 8, 148):        s += 0.25
-        if self._is_extended(lm, 17, 18, 20, 148):     s += 0.25
-        if self._is_bent(lm, 9, 10, 12):               s += 0.15
-        if self._is_bent(lm, 13, 14, 16):              s += 0.15
+
+    def _s_ardhachandra(self, lm, hs):
+        """All 4 fingers extended together. Thumb OUT."""
+        if not self._four_ext(lm, 142): return 0.0
+        if not self._thumb_out(lm, hs): return 0.0
+        sp = self._spread(lm, 5, 17, hs)
+        if sp > 0.58: return 0.0
+        s = 0.35 + 0.35
+        if sp < 0.42: s += 0.30
+        elif sp < 0.58: s += 0.15
         return min(s, 1.0)
-    
-    def _score_kangula(self, lm, hs):
-        """Bell: ONLY ring finger extended, all others bent."""
+
+    def _s_tripataka(self, lm, hs):
+        """Pataka with ring finger bent."""
+        ring_angle = self._fangle(lm, 13, 14, 16)
+        if ring_angle > 155: return 0.0
+        if not self._extended(lm, 5, 6, 8, 140): return 0.0
+        if not self._extended(lm, 9, 10, 12, 140): return 0.0
+        if not self._extended(lm, 17, 18, 20, 140): return 0.0
+        if self._spread(lm, 5, 17, hs) > 0.48: return 0.0
         s = 0.0
-        if self._is_extended(lm, 13, 14, 16, 148):     s += 0.40
-        if self._is_bent(lm, 5, 6, 8):                 s += 0.20
-        if self._is_bent(lm, 9, 10, 12):               s += 0.20
-        if self._is_bent(lm, 17, 18, 20):              s += 0.10
-        if self._thumb_tucked(lm, hs):               s += 0.10
+        s += 0.28 if self._extended(lm, 5, 6, 8, 150) else 0.15
+        s += 0.28 if self._extended(lm, 9, 10, 12, 150) else 0.15
+        s += 0.28 if self._extended(lm, 17, 18, 20, 150) else 0.15
+        s += 0.16 if ring_angle < 130 else 0.08
         return min(s, 1.0)
-    
-    def _score_chatura(self, lm, hs):
-        """Four: Index+Middle+Ring extended together, Pinky bent, thumb tucked."""
+
+    def _s_ardhapataka(self, lm, hs):
+        """Index+Middle extended TOGETHER. Ring+Pinky bent."""
+        if not self._bent(lm, 13, 14, 16, 132): return 0.0
+        if not self._bent(lm, 17, 18, 20, 132): return 0.0
+        if not self._extended(lm, 5, 6, 8, 135): return 0.0
+        if not self._extended(lm, 9, 10, 12, 135): return 0.0
+        # Loosened from 0.22 to 0.28
+        if self._spread(lm, 5, 9, hs) > 0.28: return 0.0
         s = 0.0
-        if self._is_extended(lm, 5, 6, 8):             s += 0.20
-        if self._is_extended(lm, 9, 10, 12):           s += 0.20
-        if self._is_extended(lm, 13, 14, 16):          s += 0.20
-        if self._is_bent(lm, 17, 18, 20):              s += 0.20
-        if self._thumb_tucked(lm, hs):               s += 0.10
-        if self._spread(lm, 5, 13, hs) < 0.45:      s += 0.10
+        s += 0.28 if self._extended(lm, 5, 6, 8, 148) else 0.15
+        s += 0.28 if self._extended(lm, 9, 10, 12, 148) else 0.15
+        s += 0.22 if self._bent(lm, 13, 14, 16, 122) else 0.10
+        s += 0.22 if self._bent(lm, 17, 18, 20, 122) else 0.10
         return min(s, 1.0)
-    
-    def _score_bhramara(self, lm, hs):
-        """Bee: Index curled to its own base, middle+ring+pinky extended,
-        thumb near index DIP."""
+
+    def _s_kartarimukha(self, lm, hs):
+        """Scissors: Index+Middle spread apart (scissors shape).
+        Ring+Pinky bent AND pressed against thumb."""
+        # Hard gate: index must be extended
+        if not self._extended(lm, 5, 6, 8, 135): return 0.0
+        # Hard gate: middle must be extended
+        if not self._extended(lm, 9, 10, 12, 135): return 0.0
+        # Hard gate: ring must be bent
+        if not self._bent(lm, 13, 14, 16, 138): return 0.0
+        # Hard gate: pinky must be bent
+        if not self._bent(lm, 17, 18, 20, 138): return 0.0
+        # Hard gate: index+middle must be SPREAD (scissors)
+        if self._spread(lm, 5, 9, hs) < 0.18: return 0.0
         s = 0.0
-        if self._dist(lm[8], lm[5]) / hs < 0.25:   s += 0.35
-        if self._is_extended(lm, 9, 10, 12, 145):      s += 0.20
-        if self._is_extended(lm, 13, 14, 16, 145):     s += 0.20
-        if self._is_extended(lm, 17, 18, 20, 145):     s += 0.10
-        if self._dist(lm[4], lm[7]) / hs < 0.18:   s += 0.15
+        s += 0.25 if self._extended(lm, 5, 6, 8, 145) else 0.12
+        s += 0.25 if self._extended(lm, 9, 10, 12, 145) else 0.12
+        s += 0.20 if self._bent(lm, 13, 14, 16, 128) else 0.10
+        s += 0.20 if self._bent(lm, 17, 18, 20, 128) else 0.10
+        sp = self._spread(lm, 5, 9, hs)
+        if sp > 0.25: s += 0.10
         return min(s, 1.0)
-    
-    def _score_hamsasya(self, lm, hs):
-        """Swan Beak: Thumb+Index pinch (<0.10), middle half-out, ring+pinky bent."""
+
+    def _s_mayura(self, lm, hs):
+        """Ring+Thumb touch. Index+Middle+Pinky extended."""
+        # Hard gate: ring tip must touch thumb tip
+        if not self._touching(lm, 4, 16, hs, 0.18): return 0.0
+        # Hard gate: index must be extended
+        if not self._extended(lm, 5, 6, 8, 132): return 0.0
+        # Hard gate: middle must be extended
+        if not self._extended(lm, 9, 10, 12, 132): return 0.0
+        # Hard gate: pinky must be extended
+        if not self._extended(lm, 17, 18, 20, 132): return 0.0
+        # Hard gate: ring finger must be bent (touching thumb)
+        if not self._bent(lm, 13, 14, 16, 145): return 0.0
         s = 0.0
-        if self._tips_touching(lm, 4, 8, hs, 0.10):     s += 0.45
-        angle = self._finger_angle(lm, 9, 10, 12)
-        if 130 <= angle <= 158:                         s += 0.25
-        if self._is_bent(lm, 13, 14, 16):              s += 0.15
-        if self._is_bent(lm, 17, 18, 20):              s += 0.15
+        s += 0.55 if self._touching(lm, 4, 16, hs, 0.13) else 0.35
+        s += 0.15 if self._extended(lm, 5, 6, 8, 142) else 0.08
+        s += 0.15 if self._extended(lm, 9, 10, 12, 142) else 0.08
+        s += 0.15 if self._extended(lm, 17, 18, 20, 142) else 0.08
         return min(s, 1.0)
-    
-    def _score_hamsapaksha(self, lm, hs):
-        """Swan Wing: Thumb+Index+Middle+Ring extended, Pinky bent."""
+
+    def _s_arala(self, lm, hs):
+        """Index curved. Middle+Ring+Pinky straight. Thumb bent."""
+        ia = self._fangle(lm, 5, 6, 8)
+        if ia > 155 or ia < 108: return 0.0
+        if not self._extended(lm, 9, 10, 12, 135): return 0.0
+        if not self._extended(lm, 13, 14, 16, 135): return 0.0
+        if not self._extended(lm, 17, 18, 20, 132): return 0.0
+        # Hard gate: ring must NOT be bent (else Shukatunda)
+        if self._bent(lm, 13, 14, 16, 140): return 0.0
         s = 0.0
-        if self._thumb_extended(lm, hs):                  s += 0.15
-        if self._is_extended(lm, 5, 6, 8):             s += 0.20
-        if self._is_extended(lm, 9, 10, 12):           s += 0.20
-        if self._is_extended(lm, 13, 14, 16):          s += 0.20
-        if self._is_bent(lm, 17, 18, 20):              s += 0.25
+        if 108 <= ia <= 155: s += 0.50
+        s += 0.18 if self._extended(lm, 9, 10, 12, 148) else 0.10
+        s += 0.18 if self._extended(lm, 13, 14, 16, 148) else 0.10
+        s += 0.14 if self._extended(lm, 17, 18, 20, 142) else 0.08
         return min(s, 1.0)
-    
-    def _score_sandamsha(self, lm, hs):
-        """Tongs: Very tight thumb+index pinch (<0.08), ALL others bent.
-        Tighter than Hamsasya. Penalize if middle is extended."""
-        d = self._dist(lm[4], lm[8]) / hs
+
+    def _s_shukatunda(self, lm, hs):
+        """Arala with ring finger also bent. Index curved + Ring bent."""
+        ia = self._fangle(lm, 5, 6, 8)
+        # Hard gate: index must be curved (like Arala)
+        if ia > 158 or ia < 80: return 0.0
+        # Hard gate: ring MUST be bent
+        if not self._bent(lm, 13, 14, 16, 140): return 0.0
+        # Hard gate: middle must be extended
+        if not self._extended(lm, 9, 10, 12, 130): return 0.0
         s = 0.0
-        if d < 0.08:    s += 0.50
-        elif d < 0.11:  s += 0.30
-        if self._is_bent(lm, 9, 10, 12, 115):          s += 0.15
-        if self._is_bent(lm, 13, 14, 16, 115):         s += 0.15
-        if self._is_bent(lm, 17, 18, 20, 115):         s += 0.15
-        if self._is_extended(lm, 9, 10, 12, 145):      s -= 0.20
-        return max(min(s, 1.0), 0.0)
-    
-    def _score_mukula(self, lm, hs):
-        """Flower Bud: All 5 fingertips converging to one point."""
-        import numpy as np
-        tips = [lm[4], lm[8], lm[12], lm[16], lm[20]]
-        cx = np.mean([t[0] for t in tips])
-        cy = np.mean([t[1] for t in tips])
-        avg_d = np.mean([
-            self._dist(t, (cx, cy, 0)) / hs for t in tips
+        if 80 <= ia <= 158: s += 0.42
+        s += 0.30 if self._bent(lm, 13, 14, 16, 125) else 0.15
+        s += 0.20 if self._extended(lm, 9, 10, 12, 140) else 0.10
+        s += 0.08 if self._extended(lm, 17, 18, 20, 130) else 0.04
+        return min(s, 1.0)
+
+    def _s_mushti(self, lm, hs):
+        """Full fist. All 4 bent. Thumb tucked over fingers."""
+        if not self._four_bent(lm, 108): return 0.0
+        if not self._thumb_tucked(lm, hs): return 0.0
+        if lm[4][1] < lm[2][1]: return 0.0  # thumb pointing up = Shikhara
+        s = 0.55
+        s += 0.35 if self._thumb_tucked(lm, hs) else 0.0
+        if self._dist(lm[4], lm[5]) / hs < 0.30: s += 0.10
+        return min(s, 1.0)
+
+    def _s_shikhara(self, lm, hs):
+        """Fist with thumb pointing UP."""
+        # Hard gate: index must be bent (not extended like Chandrakala)
+        if self._extended(lm, 5, 6, 8, 140): return 0.0
+        if not self._four_bent(lm, 112): return 0.0
+        if not self._thumb_out(lm, hs): return 0.0
+        if not lm[4][1] < lm[2][1]: return 0.0
+        s = 0.45 + 0.25
+        if lm[4][1] < lm[2][1]: s += 0.30
+        if lm[4][1] < lm[0][1]: s += 0.10
+        return min(s, 1.0)
+
+    def _s_kapittha(self, lm, hs):
+        """Index+Middle curled. Thumb near their tips."""
+        ia = self._fangle(lm, 5, 6, 8)
+        ma = self._fangle(lm, 9, 10, 12)
+        if ia > 148 or ia < 72: return 0.0
+        if ma > 148 or ma < 72: return 0.0
+        thumb_near = (self._dist(lm[4], lm[8]) / hs < 0.28 or
+                      self._dist(lm[4], lm[12]) / hs < 0.28)
+        if not thumb_near: return 0.0
+        s = 0.0
+        if 72 <= ia <= 148: s += 0.22
+        if 72 <= ma <= 148: s += 0.22
+        s += 0.28 if thumb_near else 0.0
+        s += 0.15 if self._bent(lm, 13, 14, 16, 132) else 0.05
+        s += 0.13 if self._bent(lm, 17, 18, 20, 132) else 0.05
+        return min(s, 1.0)
+
+    def _s_katakamukha(self, lm, hs):
+        """Thumb+Index+Middle tips triangle. Ring+Pinky extended."""
+        if not self._extended(lm, 13, 14, 16, 142): return 0.0
+        if not self._extended(lm, 17, 18, 20, 142): return 0.0
+        s = 0.0
+        if self._dist(lm[4], lm[8]) / hs  < 0.16: s += 0.20
+        if self._dist(lm[8], lm[12]) / hs < 0.16: s += 0.15
+        if self._dist(lm[4], lm[12]) / hs < 0.16: s += 0.15
+        s += 0.25 if self._extended(lm, 13, 14, 16, 148) else 0.12
+        s += 0.25 if self._extended(lm, 17, 18, 20, 148) else 0.12
+        return min(s, 1.0)
+
+    def _s_suchi(self, lm, hs):
+        """Index pointing. All others bent. Thumb TUCKED (not released)."""
+        if not self._extended(lm, 5, 6, 8, 155): return 0.0
+        if not self._bent(lm, 9, 10, 12, 120): return 0.0
+        if not self._bent(lm, 13, 14, 16, 120): return 0.0
+        if not self._bent(lm, 17, 18, 20, 120): return 0.0
+        # Hard gate: thumb must be TUCKED (Chandrakala has thumb out)
+        if not self._thumb_tucked(lm, hs): return 0.0
+        s = 0.40
+        s += 0.20 if self._bent(lm, 9, 10, 12, 108) else 0.10
+        s += 0.20 if self._bent(lm, 13, 14, 16, 108) else 0.10
+        s += 0.10 if self._bent(lm, 17, 18, 20, 108) else 0.05
+        s += 0.10 if self._thumb_tucked(lm, hs) else 0.0
+        return min(s, 1.0)
+
+    def _s_chandrakala(self, lm, hs):
+        """Suchi with thumb released/open. Index pointing, thumb free."""
+        # Hard gate: index must be pointing (like Suchi)
+        if not self._extended(lm, 5, 6, 8, 150): return 0.0
+        # Hard gate: middle ring pinky must be bent (like Suchi)
+        if not self._bent(lm, 9, 10, 12, 130): return 0.0
+        if not self._bent(lm, 13, 14, 16, 130): return 0.0
+        if not self._bent(lm, 17, 18, 20, 130): return 0.0
+        # Hard gate: thumb must be OUT/released (unlike Suchi)
+        if not self._thumb_out(lm, hs): return 0.0
+        s = 0.0
+        s += 0.35 if self._extended(lm, 5, 6, 8, 158) else 0.20
+        s += 0.30 if self._thumb_out(lm, hs) else 0.0
+        s += 0.15 if self._bent(lm, 9, 10, 12, 118) else 0.08
+        s += 0.10 if self._bent(lm, 13, 14, 16, 118) else 0.05
+        s += 0.10 if self._bent(lm, 17, 18, 20, 118) else 0.05
+        return min(s, 1.0)
+
+    def _s_padmakosha(self, lm, hs):
+        """All 5 half-bent. No fully extended, no fully bent."""
+        if self._extended(lm, 5, 6, 8, 155): return 0.0
+        if self._extended(lm, 9, 10, 12, 155): return 0.0
+        if self._extended(lm, 13, 14, 16, 155): return 0.0
+        if self._extended(lm, 17, 18, 20, 155): return 0.0
+        if self._bent(lm, 5, 6, 8, 85): return 0.0
+        if self._bent(lm, 9, 10, 12, 85): return 0.0
+        angles = [
+            self._fangle(lm, 5, 6, 8),
+            self._fangle(lm, 9, 10, 12),
+            self._fangle(lm, 13, 14, 16),
+            self._fangle(lm, 17, 18, 20),
+        ]
+        count = sum(1 for a in angles if 100 <= a <= 158)
+        ta = self._fangle(lm, 1, 2, 4)
+        if 95 <= ta <= 158: count += 1
+        if count < 3: return 0.0
+        return min(count * 0.20, 1.0)
+
+    def _s_sarpashirsha(self, lm, hs):
+        """All 4 extended but tips DROOPING. Thumb tucked."""
+        if not self._four_ext(lm, 135): return 0.0
+        if not self._thumb_tucked(lm, hs): return 0.0
+        droop = sum([
+            lm[8][1]  > lm[7][1],
+            lm[12][1] > lm[11][1],
+            lm[16][1] > lm[15][1],
+            lm[20][1] > lm[19][1],
         ])
-        if avg_d < 0.08: return 1.0
-        if avg_d < 0.12: return 0.75
-        if avg_d < 0.16: return 0.50
+        if droop < 3: return 0.0
+        s = 0.30
+        s += 0.15 * droop
+        s += 0.10 if self._thumb_tucked(lm, hs) else 0.0
+        return min(s, 1.0)
+
+    def _s_mrigashirsha(self, lm, hs):
+        """Index+Middle+Ring drooping. Pinky+Thumb UP."""
+        if not self._bent(lm, 5, 6, 8, 135): return 0.0
+        if not self._bent(lm, 9, 10, 12, 135): return 0.0
+        if not self._bent(lm, 13, 14, 16, 135): return 0.0
+        if not self._extended(lm, 17, 18, 20, 132): return 0.0
+        if not self._thumb_out(lm, hs): return 0.0
+        s = 0.0
+        s += 0.20 if self._bent(lm, 5, 6, 8, 125) else 0.10
+        s += 0.20 if self._bent(lm, 9, 10, 12, 125) else 0.10
+        s += 0.20 if self._bent(lm, 13, 14, 16, 125) else 0.10
+        s += 0.25 if self._extended(lm, 17, 18, 20, 142) else 0.12
+        s += 0.15 if self._thumb_out(lm, hs) else 0.0
+        return min(s, 1.0)
+
+    def _s_simhamukha(self, lm, hs):
+        """Middle+Ring bent to thumb. Index+Pinky extended."""
+        if not self._bent(lm, 9, 10, 12, 132): return 0.0
+        if not self._bent(lm, 13, 14, 16, 132): return 0.0
+        if not self._extended(lm, 5, 6, 8, 132): return 0.0
+        if not self._extended(lm, 17, 18, 20, 132): return 0.0
+        mid_near = self._dist(lm[12], lm[4]) / hs < 0.38
+        ring_near = self._dist(lm[16], lm[4]) / hs < 0.38
+        if not (mid_near or ring_near): return 0.0
+        s = 0.0
+        s += 0.18 if mid_near else 0.05
+        s += 0.18 if ring_near else 0.05
+        s += 0.25 if self._extended(lm, 5, 6, 8, 142) else 0.12
+        s += 0.25 if self._extended(lm, 17, 18, 20, 142) else 0.12
+        s += 0.14 if self._bent(lm, 9, 10, 12, 122) else 0.07
+        return min(s, 1.0)
+
+    def _s_kangula(self, lm, hs):
+        """Padmakosha with ring bent inward. Others half-bent."""
+        if not self._bent(lm, 13, 14, 16, 128): return 0.0
+        if self._extended(lm, 5, 6, 8, 156): return 0.0
+        if self._extended(lm, 9, 10, 12, 156): return 0.0
+        if self._extended(lm, 17, 18, 20, 156): return 0.0
+        angles = [
+            self._fangle(lm, 5, 6, 8),
+            self._fangle(lm, 9, 10, 12),
+            self._fangle(lm, 17, 18, 20),
+        ]
+        hb = sum(1 for a in angles if 100 <= a <= 156)
+        if hb < 2: return 0.0
+        s = 0.0
+        s += 0.42 if self._bent(lm, 13, 14, 16, 118) else 0.22
+        s += 0.15 * hb
+        if self._dist(lm[16], lm[4]) / hs < 0.42: s += 0.13
+        return min(s, 1.0)
+
+    def _s_chatura(self, lm, hs):
+        """Pinky UP. Index+Middle+Ring bent. Thumb near ring base."""
+        if not self._extended(lm, 17, 18, 20, 135): return 0.0
+        if not self._bent(lm, 5, 6, 8, 135): return 0.0
+        if not self._bent(lm, 9, 10, 12, 135): return 0.0
+        if not self._bent(lm, 13, 14, 16, 135): return 0.0
+        s = 0.0
+        s += 0.38 if self._extended(lm, 17, 18, 20, 145) else 0.20
+        s += 0.20 if self._bent(lm, 5, 6, 8, 125) else 0.10
+        s += 0.20 if self._bent(lm, 9, 10, 12, 125) else 0.10
+        tb = self._dist(lm[4], lm[13]) / hs < 0.38
+        s += 0.15 if tb else 0.05
+        s += 0.07 if self._bent(lm, 13, 14, 16, 125) else 0.03
+        return min(s, 1.0)
+
+    def _s_bhramara(self, lm, hs):
+        """Index curled. Middle+Thumb touch. Ring+Pinky extended."""
+        if self._dist(lm[8], lm[5]) / hs > 0.30: return 0.0
+        if not self._touching(lm, 4, 12, hs, 0.20): return 0.0
+        if not self._extended(lm, 13, 14, 16, 132): return 0.0
+        if not self._extended(lm, 17, 18, 20, 132): return 0.0
+        s = 0.0
+        cd = self._dist(lm[8], lm[5]) / hs
+        if cd < 0.20: s += 0.30
+        elif cd < 0.30: s += 0.18
+        s += 0.30 if self._touching(lm, 4, 12, hs, 0.15) else 0.15
+        s += 0.20 if self._extended(lm, 13, 14, 16, 142) else 0.10
+        s += 0.20 if self._extended(lm, 17, 18, 20, 142) else 0.10
+        return min(s, 1.0)
+
+    def _s_hamsasya(self, lm, hs):
+        """Thumb+Index touch. Middle+Ring+Pinky extended up."""
+        if not self._touching(lm, 4, 8, hs, 0.16): return 0.0
+        if not self._extended(lm, 9, 10, 12, 132): return 0.0
+        if not self._extended(lm, 13, 14, 16, 132): return 0.0
+        if not self._extended(lm, 17, 18, 20, 132): return 0.0
+        s = 0.0
+        s += 0.50 if self._touching(lm, 4, 8, hs, 0.11) else 0.30
+        s += 0.18 if self._extended(lm, 9, 10, 12, 142) else 0.10
+        s += 0.18 if self._extended(lm, 13, 14, 16, 142) else 0.10
+        s += 0.14 if self._extended(lm, 17, 18, 20, 142) else 0.08
+        return min(s, 1.0)
+
+    def _s_hamsapaksha(self, lm, hs):
+        """Sarpashirsha base + pinky straight. Thumb tucked."""
+        if not self._bent(lm, 5, 6, 8, 135): return 0.0
+        if not self._bent(lm, 9, 10, 12, 135): return 0.0
+        if not self._bent(lm, 13, 14, 16, 135): return 0.0
+        if not self._extended(lm, 17, 18, 20, 132): return 0.0
+        if self._thumb_out(lm, hs): return 0.0
+        s = 0.0
+        s += 0.20 if self._bent(lm, 5, 6, 8, 125) else 0.10
+        s += 0.20 if self._bent(lm, 9, 10, 12, 125) else 0.10
+        s += 0.20 if self._bent(lm, 13, 14, 16, 125) else 0.10
+        s += 0.40 if self._extended(lm, 17, 18, 20, 142) else 0.20
+        return min(s, 1.0)
+
+    def _s_sandamsha(self, lm, hs):
+        """Very tight pinch. All others bent."""
+        if not self._bent(lm, 9, 10, 12, 118): return 0.0
+        if not self._bent(lm, 13, 14, 16, 118): return 0.0
+        if not self._bent(lm, 17, 18, 20, 118): return 0.0
+        d = self._dist(lm[4], lm[8]) / hs
+        if d > 0.13: return 0.0
+        s = 0.0
+        if d < 0.06: s += 0.60
+        elif d < 0.09: s += 0.45
+        elif d < 0.13: s += 0.28
+        s += 0.13 if self._bent(lm, 9, 10, 12, 108) else 0.07
+        s += 0.13 if self._bent(lm, 13, 14, 16, 108) else 0.07
+        s += 0.14 if self._bent(lm, 17, 18, 20, 108) else 0.07
+        return min(s, 1.0)
+
+    def _s_mukula(self, lm, hs):
+        """All 5 tips converging to one point."""
+        tips = [lm[4], lm[8], lm[12], lm[16], lm[20]]
+        cx = sum(t[0] for t in tips)/5
+        cy = sum(t[1] for t in tips)/5
+        dists = [self._dist(t, (cx,cy,0))/hs for t in tips]
+        if max(dists) > 0.15: return 0.0
+        avg = sum(dists)/5
+        if avg < 0.04: return 1.0
+        if avg < 0.07: return 0.85
+        if avg < 0.11: return 0.65
         return 0.0
-    
-    def _score_tamrachuda(self, lm, hs):
-        """Rooster Comb: Thumb up AND index forward, others bent."""
+
+    def _s_tamrachuda(self, lm, hs):
+        """Thumb UP + Index extended. Middle+Ring+Pinky bent."""
+        if not self._extended(lm, 5, 6, 8, 145): return 0.0
+        if not self._bent(lm, 9, 10, 12, 128): return 0.0
+        if not self._bent(lm, 13, 14, 16, 128): return 0.0
+        if not self._bent(lm, 17, 18, 20, 128): return 0.0
+        if not self._thumb_out(lm, hs): return 0.0
+        if not lm[4][1] < lm[2][1]: return 0.0
+        s = 0.35
+        s += 0.15 if lm[4][1] < lm[0][1] else 0.05
+        s += 0.30 if self._extended(lm, 5, 6, 8, 155) else 0.15
+        s += 0.10 if self._bent(lm, 9, 10, 12, 118) else 0.05
+        s += 0.10 if self._bent(lm, 13, 14, 16, 118) else 0.05
+        return min(s, 1.0)
+
+    def _s_trishula(self, lm, hs):
+        """Index+Middle+Pinky up and SPREAD WIDE. Ring bent."""
+        ring_angle = self._fangle(lm, 13, 14, 16)
+        if ring_angle > 148: return 0.0
+        if not self._extended(lm, 5, 6, 8, 138): return 0.0
+        if not self._extended(lm, 9, 10, 12, 138): return 0.0
+        if not self._extended(lm, 17, 18, 20, 138): return 0.0
+        # Hard gate: fingers MUST be spread (distinguishes from Tripataka)
+        if self._spread(lm, 5, 17, hs) < 0.35: return 0.0
         s = 0.0
-        if self._thumb_extended(lm, hs):                  s += 0.35
-        if lm[4][1] < lm[2][1]:                      s += 0.15
-        if self._is_extended(lm, 5, 6, 8, 155):        s += 0.25
-        if self._is_bent(lm, 9, 10, 12):               s += 0.10
-        if self._is_bent(lm, 13, 14, 16):              s += 0.10
-        if self._is_bent(lm, 17, 18, 20):              s += 0.05
+        s += 0.22 if self._extended(lm, 5, 6, 8, 148) else 0.12
+        s += 0.22 if self._extended(lm, 9, 10, 12, 148) else 0.12
+        s += 0.22 if self._extended(lm, 17, 18, 20, 148) else 0.12
+        s += 0.22 if ring_angle < 130 else 0.10
+        sp = self._spread(lm, 5, 17, hs)
+        if sp > 0.45: s += 0.12
+        elif sp > 0.35: s += 0.06
         return min(s, 1.0)
-    
-    def _score_trishula(self, lm, hs):
-        """Trident: Index+Middle+Ring extended and spread wide, Pinky bent."""
-        s = 0.0
-        if self._is_extended(lm, 5, 6, 8):             s += 0.20
-        if self._is_extended(lm, 9, 10, 12):           s += 0.20
-        if self._is_extended(lm, 13, 14, 16):          s += 0.20
-        sp = self._spread(lm, 5, 13, hs)
-        if sp > 0.35:                                 s += 0.20
-        if sp > 0.45:                                 s += 0.10
-        if self._is_bent(lm, 17, 18, 20):              s += 0.10
-        return min(s, 1.0)
-    
-    def _score_tarjani(self, lm, hs):
-        """Warning Point: Index pointing, THUMB EXTENDED outward.
-        Differs from Suchi where thumb is tucked."""
-        s = 0.0
-        if self._is_extended(lm, 5, 6, 8, 160):        s += 0.40
-        if self._is_bent(lm, 9, 10, 12, 115):          s += 0.15
-        if self._is_bent(lm, 13, 14, 16, 115):         s += 0.15
-        if self._is_bent(lm, 17, 18, 20, 115):         s += 0.15
-        if self._thumb_extended(lm, hs):                   s += 0.15
-        return min(s, 1.0)
-        
-    def _score_abhaya(self, lm, hs):
-        """Blessing: Pataka shape + palm facing outward (Z coords)."""
-        s = self._score_pataka(lm, hs) * 0.70
-        import numpy as np
-        tips_z = np.mean([lm[8][2], lm[12][2], lm[16][2], lm[20][2]])
-        if lm[0][2] - tips_z > 0.05:                s += 0.30
-        return min(s, 1.0)
-    
-    def _score_varada(self, lm, hs):
-        """Boon Giving: Open hand, palm DOWN, fingers pointing downward."""
-        s = 0.0
-        if self._all_four_extended(lm, 145):                  s += 0.40
-        import numpy as np
-        tips_y = np.mean([lm[8][1], lm[12][1], lm[16][1], lm[20][1]])
-        if tips_y > lm[0][1]:                        s += 0.40
-        if self._thumb_extended(lm, hs):                   s += 0.20
-        return min(s, 1.0)
-    
-    def _score_vyakhyana(self, lm, hs):
-        """Explanation: Thumb+Index pinch, palm out, others extended."""
-        s = 0.0
-        if self._tips_touching(lm, 4, 8, hs, 0.11):     s += 0.35
-        if self._is_extended(lm, 9, 10, 12, 145):      s += 0.20
-        if self._is_extended(lm, 13, 14, 16, 145):     s += 0.20
-        if self._is_extended(lm, 17, 18, 20, 145):     s += 0.15
-        import numpy as np
-        tips_z = np.mean([lm[9][2], lm[13][2]])
-        if lm[0][2] - tips_z > 0.03:                s += 0.10
-        return min(s, 1.0)
-    
-    def _score_vismaya(self, lm, hs):
-        """Wonder: All 5 spread like Alapadma but palm facing inward."""
-        s = self._score_alapadma(lm, hs) * 0.70
-        import numpy as np
-        tips_z = np.mean([lm[8][2], lm[12][2], lm[16][2], lm[20][2]])
-        if tips_z - lm[0][2] > 0.03:                s += 0.30
-        return min(s, 1.0)
-    # ==================== MUDRA GROUPS INITIALIZATION ====================
-    
-    def _init_mudra_groups(self):
-        """Initialize mudra groups mapping"""
-        self.mudra_groups = {
-            'all_open': ['Alapadma','Ardhachandra','Arala','Vismaya', 
-                       'Hamsapaksha','Varada','Abhaya','Sarpashirsha'],
-            'four_open': ['Pataka','Sarpashirsha','Chatura', 'Tripataka','Trishula'],
-            'fist': ['Mushti','Shikhara','Tamrachuda','Kapittha'],
-            'pinch': ['Hamsasya','Sandamsha','Mayura','Mukula', 
-                     'Katakamukha','Chandrakala','Vyakhyana', 
-                     'Kapittha','Bhramara'],
-            'one_up': ['Suchi','Tarjani','Kangula','Shikhara'],
-            'two_up': ['Kartarimukha','Ardhapataka','Mrigashirsha', 
-                      'Simhamukha','Hamsapaksha'],
-            'three_up': ['Tripataka','Katakamukha','Hamsapaksha','Chatura'],
-            'mixed': ['Arala','Shukatunda','Bhramara','Padmakosha', 'Kangula','Mrigashirsha'],
-        }
-        
-        # Map mudra names to scoring functions
-        self.mudra_scorers = {
-            'Pataka': self._score_pataka,
-            'Alapadma': self._score_alapadma,
-            'Mushti': self._score_mushti,
-            'Shikhara': self._score_shikhara,
-            'Suchi': self._score_suchi,
-            'Tripataka': self._score_tripataka,
-            'Kartarimukha': self._score_kartarimukha,
-            'Hamsasya': self._score_hamsasya,
-            'Sandamsha': self._score_sandamsha,
-            'Mayura': self._score_mayura,
-            'Ardhachandra': self._score_ardhachandra,
-            'Arala': self._score_arala,
-            'Shukatunda': self._score_shukatunda,
-            'Kapittha': self._score_kapittha,
-            'Katakamukha': self._score_katakamukha,
-            'Chandrakala': self._score_chandrakala,
-            'Padmakosha': self._score_padmakosha,
-            'Sarpashirsha': self._score_sarpashirsha,
-            'Mrigashirsha': self._score_mrigashirsha,
-            'Simhamukha': self._score_simhamukha,
-            'Kangula': self._score_kangula,
-            'Chatura': self._score_chatura,
-            'Bhramara': self._score_bhramara,
-            'Hamsapaksha': self._score_hamsapaksha,
-            'Mukula': self._score_mukula,
-            'Tamrachuda': self._score_tamrachuda,
-            'Trishula': self._score_trishula,
-            'Tarjani': self._score_tarjani,
-            'Abhaya': self._score_abhaya,
-            'Varada': self._score_varada,
-            'Vyakhyana': self._score_vyakhyana,
-            'Vismaya': self._score_vismaya,
-        }
-    
-    def _score_tripataka(self, lm, hs):
-        """Tripataka: Index+Middle+Pinky extended; Ring finger bent; thumb tucked"""
-        s = 0.0
-        if self._is_extended(lm, 5, 6, 8):
-            s += 0.22
-        if self._is_extended(lm, 9, 10, 12):
-            s += 0.22
-        if self._is_bent(lm, 13, 14, 16):
-            s += 0.27
-        if self._is_extended(lm, 17, 18, 20):
-            s += 0.20
-        if self._thumb_tucked(lm, hs):
-            s += 0.09
-        return min(s, 1.0)
-    
-    def _score_kartarimukha(self, lm, hs):
-        """Kartarimukha: Index+Middle both extended AND spread apart, Ring+Pinky bent"""
-        s = 0.0
-        if self._is_extended(lm, 5, 6, 8):
-            s += 0.20
-        if self._is_extended(lm, 9, 10, 12):
-            s += 0.20
-        spread = self._spread(lm, 5, 9, hs)
-        if spread > 0.20:
-            s += 0.25
-        if spread > 0.27:  # bonus
-            s += 0.10
-        if self._is_bent(lm, 13, 14, 16):
-            s += 0.15
-        if self._is_bent(lm, 17, 18, 20):
-            s += 0.10
-        return min(s, 1.0)
-    
-    def recognize_single(self, landmarks, handedness, debug=False):
-        """
-        Main single-hand mudra recognition with scoring system
-        Returns: (mudra_name: str, score: float)
-        If debug=True: (mudra_name, score, debug_dict)
-        """
-        if not landmarks or len(landmarks) != 21:
-            return ("Unknown", 0.0) if not debug else ("Unknown", 0.0, {})
-        
-        # Step 1: Normalize hand orientation
-        lm = self._normalize_hand(landmarks, handedness)
-        hs = self._hand_size(lm)
-        
-        # Step 2: Stage 1 pre-filter
-        groups, flags = self._get_stage1_groups(lm, hs)
-        
-        # Step 3: Get candidate mudras from matched groups
-        candidates = set()
-        for group in groups:
-            candidates.update(self.mudra_groups.get(group, []))
-        
-        # Step 4: Score only candidate mudras
-        scores = {}
-        for mudra_name in candidates:
-            if mudra_name in self.mudra_scorers:
-                scores[mudra_name] = self.mudra_scorers[mudra_name](lm, hs)
-        
-        # Smooth scores for display only — do NOT use smoothed
-        # scores for the actual recognition decision
-        display_buf = (self.display_scores_right 
-                       if handedness == 'Right' 
-                       else self.display_scores_left)
-        
-        for name, sc in scores.items():
-            if name in display_buf:
-                display_buf[name] = (self.DISPLAY_ALPHA * sc + 
-                                     (1 - self.DISPLAY_ALPHA) * display_buf[name])
+
+    # ─────────────────────────────────────────
+    # DISPATCH
+    # ─────────────────────────────────────────
+
+    SCORERS = {
+        'Pataka':       '_s_pataka',
+        'Alapadma':     '_s_alapadma',
+        'Ardhachandra': '_s_ardhachandra',
+        'Tripataka':    '_s_tripataka',
+        'Ardhapataka':  '_s_ardhapataka',
+        'Kartarimukha': '_s_kartarimukha',
+        'Mayura':       '_s_mayura',
+        'Arala':        '_s_arala',
+        'Shukatunda':   '_s_shukatunda',
+        'Mushti':       '_s_mushti',
+        'Shikhara':     '_s_shikhara',
+        'Kapittha':     '_s_kapittha',
+        'Katakamukha':  '_s_katakamukha',
+        'Suchi':        '_s_suchi',
+        'Chandrakala':  '_s_chandrakala',
+        'Padmakosha':   '_s_padmakosha',
+        'Sarpashirsha': '_s_sarpashirsha',
+        'Mrigashirsha': '_s_mrigashirsha',
+        'Simhamukha':   '_s_simhamukha',
+        'Kangula':      '_s_kangula',
+        'Chatura':      '_s_chatura',
+        'Bhramara':     '_s_bhramara',
+        'Hamsasya':     '_s_hamsasya',
+        'Hamsapaksha':  '_s_hamsapaksha',
+        'Sandamsha':    '_s_sandamsha',
+        'Mukula':       '_s_mukula',
+        'Tamrachuda':   '_s_tamrachuda',
+        'Trishula':     '_s_trishula',
+    }
+
+    # ─────────────────────────────────────────
+    # TIEBREAKERS
+    # ─────────────────────────────────────────
+
+    def _tiebreak(self, scores, lm, hs):
+
+        def zero(name):
+            if name in scores: scores[name] = 0.0
+
+        # Kartarimukha vs Simhamukha — thumb and spread
+        if scores.get('Kartarimukha',0)>0.50 and scores.get('Simhamukha',0)>0.50:
+            mid_near = self._dist(lm[12], lm[4]) / hs < 0.38
+            ring_near = self._dist(lm[16], lm[4]) / hs < 0.38
+            if mid_near or ring_near:
+                scores['Kartarimukha'] = 0.0
             else:
-                display_buf[name] = sc
-        
-        # Remove mudras that dropped out of candidates
-        for name in list(display_buf.keys()):
-            if name not in scores:
-                display_buf[name] *= 0.85  # decay absent mudras
-                if display_buf[name] < 0.05:
-                    del display_buf[name]
-        
-        # Step 5: Pick highest scoring mudra above threshold
-        if scores:
-            best_mudra = max(scores, key=scores.get)
-            best_score = scores[best_mudra]
-            
-            # Apply tie-breaker rules
-            if best_score >= 0.60:
-                scores = self._apply_tiebreakers(scores, lm, hs)
-                best_mudra = max(scores, key=scores.get)
-                best_score = scores[best_mudra]
-            
-            if best_score >= 0.60:
-                result = (best_mudra, best_score)
-            else:
-                result = ("Unknown", best_score)
-        else:
-            result = ("Unknown", 0.0)
-        
-        # Step 6: Apply temporal smoothing with hysteresis
-        final_mudra = self._apply_temporal_smoothing(handedness, result[0])
-        
-        if debug:
-            smoothed_sorted = sorted(display_buf.items(), 
-                                     key=lambda x: x[1], reverse=True)
-            debug_info = {
-                'stage1_groups': groups,
-                'flags': flags,
-                'top5': smoothed_sorted[:5],
-                'finger_angles': self._get_finger_angles(lm),
-                'thumb_state': 'tucked' if flags['thumb_tuck'] else 'extended',
-                'hand_size': hs,
-                'candidates': list(candidates)
-            }
-            return (final_mudra, result[1], debug_info)
-        
-        return (final_mudra, result[1])
-    
-    def _score_two_hand(self, lm1, hs1, lm2, hs2):
-        scores = {}
-        avg_hs = (hs1 + hs2) / 2
-        w_dist = self._dist(lm1[0], lm2[0])
-        both_open = self._four_ext(lm1) and self._four_ext(lm2)
-        both_fist = self._four_bent(lm1, 110) and self._four_bent(lm2, 110)
-        wrist_cross = abs(lm1[0][0] - lm2[0][0]) < 0.15
+                scores['Simhamukha'] = 0.0
 
-        # Anjali — both open palms together
-        s = 0.0
-        if both_open:      s += 0.40
-        if w_dist < 0.25:  s += 0.35
-        if w_dist < 0.15:  s += 0.25
-        scores['Anjali'] = min(s, 1.0)
-
-        # Dola — both fists hanging
-        scores['Dola'] = min(
-            (0.50 if self._four_bent(lm1, 110) else 0) +
-            (0.50 if self._four_bent(lm2, 110) else 0), 1.0)
-
-        # Swastika — both open, wrists crossed
-        scores['Swastika'] = 0.85 if (wrist_cross and both_open) else 0.0
-
-        # Garuda — both sarpashirsha, thumbs touching
-        s = 0.0
-        if self._score_sarpashirsha(lm1, hs1) > 0.55: s += 0.35
-        if self._score_sarpashirsha(lm2, hs2) > 0.55: s += 0.35
-        if self._dist(lm1[4], lm2[4]) / avg_hs < 0.20: s += 0.30
-        scores['Garuda'] = min(s, 1.0)
-
-        # Shivalinga — one fist, one open below
-        fist1 = self._score_mushti(lm1, hs1) > 0.60
-        fist2 = self._score_mushti(lm2, hs2) > 0.60
-        open1 = self._four_ext(lm1, 145)
-        open2 = self._four_ext(lm2, 145)
-        scores['Shivalinga'] = 0.85 if (
-            (fist1 and open2) or (fist2 and open1)) else 0.0
-
-        # Pushpaputa — both open cupped side by side
-        ty1 = np.mean([lm1[8][1], lm1[12][1], lm1[16][1], lm1[20][1]])
-        ty2 = np.mean([lm2[8][1], lm2[12][1], lm2[16][1], lm2[20][1]])
-        s = 0.0
-        if both_open:                                  s += 0.40
-        if ty1 < lm1[0][1] and ty2 < lm2[0][1]:      s += 0.40
-        if w_dist < 0.35:                              s += 0.20
-        scores['Pushpaputa'] = min(s, 1.0)
-
-        # Nagabandha — both sarpashirsha, wrists crossed
-        s = 0.0
-        if self._score_sarpashirsha(lm1, hs1) > 0.55:    s += 0.35
-        if self._score_sarpashirsha(lm2, hs2) > 0.55:    s += 0.35
-        if wrist_cross:                                s += 0.30
-        scores['Nagabandha'] = min(s, 1.0)
-
-        # Dhyana — both open palms up overlapping
-        s = 0.0
-        if both_open:                                  s += 0.60
-        if ty1 < lm1[0][1] and ty2 < lm2[0][1]:      s += 0.20
-        if w_dist < 0.20:                              s += 0.20
-        scores['Dhyana'] = min(s, 1.0)
-
-        # Kapota — both open, fingers overlapping, thumbs close
-        s = 0.0
-        if both_open:                                  s += 0.40
-        if self._dist(lm1[4], lm2[4]) / avg_hs < 0.25: s += 0.30
-        if w_dist < 0.30:                              s += 0.30
-        scores['Kapota'] = min(s, 1.0)
-
-        # Avahitta — both Pataka pointing down, thumbs touching
-        s = 0.0
-        if self._score_pataka(lm1, hs1) > 0.55:           s += 0.30
-        if self._score_pataka(lm2, hs2) > 0.55:           s += 0.30
-        if self._dist(lm1[4], lm2[4]) / avg_hs < 0.20: s += 0.25
-        if (np.mean([lm1[8][1],lm1[12][1],lm1[16][1],lm1[20][1]]) > lm1[0][1] and
-            np.mean([lm2[8][1],lm2[12][1],lm2[16][1],lm2[20][1]]) > lm2[0][1]):
-            s += 0.15
-        scores['Avahitta'] = min(s, 1.0)
-
-        # Vardhamana — both Katakamukha facing apart
-        s = 0.0
-        if self._score_katakamukha(lm1, hs1) > 0.55:      s += 0.50
-        if self._score_katakamukha(lm2, hs2) > 0.55:      s += 0.50
-        scores['Vardhamana'] = min(s, 1.0)
-
-        return scores
-    
-    def recognize_two_hand(self, hand1, hand2):
-        lm1 = self._normalize(hand1[0], hand1[1])
-        lm2 = self._normalize(hand2[0], hand2[1])
-        hs1 = self._hand_size(lm1)
-        hs2 = self._hand_size(lm2)
-
-        # Two-hand mudras disabled until body landmarks added
-        if self.samyuktha_enabled:
-            two_scores = self._score_two_hand(lm1, hs1, lm2, hs2)
-            best_two   = max(two_scores, key=two_scores.get)
-            best_two_s = two_scores[best_two]
-        else:
-            best_two_s = 0.0
-            best_two   = "Unknown"
-
-        # Always fall back to best single hand
-        r1 = self.recognize_single(hand1[0], hand1[1])
-        r2 = self.recognize_single(hand2[0], hand2[1])
-        best_single = r1 if r1[1] >= r2[1] else r2
-
-        if self.samyuktha_enabled and best_two_s >= 0.65 and best_two_s > best_single[1]:
-            return best_two, best_two_s
-        return best_single
-    
-    def _apply_tiebreakers(self, scores, lm, hs):
-        """Apply tiebreaker rules to resolve ambiguous cases"""
-        # 1. Shikhara vs Mushti — thumb position is decisive
-        if scores.get('Shikhara',0) > 0.40 or scores.get('Mushti',0) > 0.40:
-            thumb_up   = lm[4][1] < lm[2][1]
-            thumb_tuck = self._thumb_tucked(lm, hs)
-            if thumb_up and not thumb_tuck:
-                scores['Mushti'] = 0.0
-            elif thumb_tuck and not thumb_up:
-                scores['Shikhara'] = 0.0
-
-        # 2. Alapadma beats Pataka when both high (spread > closed)
-        if scores.get('Alapadma',0)>0.55 and scores.get('Pataka',0)>0.55:
-            scores['Pataka'] = 0.0
-
-        # 3. Sandamsha vs Hamsasya — middle finger state decides
-        if scores.get('Sandamsha',0)>0.55 and scores.get('Hamsasya',0)>0.55:
-            if self._extended(lm, 9, 10, 12, 145):
-                scores['Sandamsha'] = 0.0
-            else:
-                scores['Hamsasya'] = 0.0
-
-        # 4. Tarjani vs Suchi — thumb state decides
-        if scores.get('Tarjani',0)>0.55 and scores.get('Suchi',0)>0.55:
+        # Chandrakala vs Suchi — thumb is decisive
+        if scores.get('Chandrakala',0)>0.50 and scores.get('Suchi',0)>0.50:
             if self._thumb_out(lm, hs):
                 scores['Suchi'] = 0.0
             else:
-                scores['Tarjani'] = 0.0
+                scores['Chandrakala'] = 0.0
 
-        # 5. Chatura vs Tripataka — pinky state decides
-        if scores.get('Chatura',0)>0.55 and scores.get('Tripataka',0)>0.55:
-            if self._bent(lm, 17, 18, 20):
+        # Shukatunda vs Arala — ring bent decides
+        if scores.get('Shukatunda',0)>0.50 and scores.get('Arala',0)>0.50:
+            if self._bent(lm, 13, 14, 16, 140):
+                scores['Arala'] = 0.0
+            else:
+                scores['Shukatunda'] = 0.0
+
+        # Trishula vs Tripataka — spread decides
+        if scores.get('Trishula',0)>0.50 and scores.get('Tripataka',0)>0.50:
+            if self._spread(lm, 5, 17, hs) > 0.30:
                 scores['Tripataka'] = 0.0
             else:
-                scores['Chatura'] = 0.0
+                scores['Trishula'] = 0.0
 
-        # 6. Tamrachuda vs Shikhara — index extension decides
-        if scores.get('Tamrachuda',0)>0.55 and scores.get('Shikhara',0)>0.55:
-            if self._extended(lm, 5, 6, 8, 155):
+        # Tripataka vs Pataka — ring angle decides
+        if scores.get('Tripataka',0)>0.50 and scores.get('Pataka',0)>0.50:
+            if self._fangle(lm, 13, 14, 16) < 158:
+                scores['Pataka'] = 0.0
+            else:
+                scores['Tripataka'] = 0.0
+
+        # Pataka vs Ardhachandra — thumb state
+        if scores.get('Pataka',0)>0.50 and scores.get('Ardhachandra',0)>0.50:
+            if self._thumb_out(lm,hs): zero('Pataka')
+            else: zero('Ardhachandra')
+
+        # Alapadma vs Ardhachandra — spread
+        if scores.get('Alapadma',0)>0.50 and scores.get('Ardhachandra',0)>0.50:
+            avg = sum([self._spread(lm,5,9,hs),
+                       self._spread(lm,9,13,hs),
+                       self._spread(lm,13,17,hs)])/3
+            if avg > 0.20: zero('Ardhachandra')
+            else: zero('Alapadma')
+
+        # Alapadma vs Pataka — spread
+        if scores.get('Alapadma',0)>0.55 and scores.get('Pataka',0)>0.55:
+            zero('Pataka')
+
+        # Sarpashirsha vs Pataka — droop
+        if scores.get('Sarpashirsha',0)>0.50 and scores.get('Pataka',0)>0.50:
+            droop = sum([lm[8][1]>lm[7][1], lm[12][1]>lm[11][1],
+                         lm[16][1]>lm[15][1], lm[20][1]>lm[19][1]])
+            if droop >= 3: zero('Pataka')
+            else: zero('Sarpashirsha')
+
+        # Mrigashirsha vs Hamsapaksha — thumb
+        if scores.get('Mrigashirsha',0)>0.50 and scores.get('Hamsapaksha',0)>0.50:
+            if self._thumb_out(lm,hs): zero('Hamsapaksha')
+            else: zero('Mrigashirsha')
+
+        # Shikhara vs Mushti — thumb up
+        if scores.get('Shikhara',0)>0.40 or scores.get('Mushti',0)>0.40:
+            if lm[4][1] < lm[2][1] and self._thumb_out(lm,hs):
+                zero('Mushti')
+            elif self._thumb_tucked(lm,hs):
+                zero('Shikhara')
+
+        # Tamrachuda vs Shikhara — index extended
+        if scores.get('Tamrachuda',0)>0.50 and scores.get('Shikhara',0)>0.50:
+            if self._extended(lm,5,6,8,145): zero('Shikhara')
+            else: zero('Tamrachuda')
+
+        # Tripataka vs Trishula — spread decides
+        if scores.get('Tripataka',0)>0.50 and scores.get('Trishula',0)>0.50:
+            if self._spread(lm, 5, 17, hs) > 0.38:
+                scores['Tripataka'] = 0.0
+            else:
+                scores['Trishula'] = 0.0
+
+        # Arala vs Pataka — index angle decides
+        if scores.get('Arala',0)>0.50 and scores.get('Pataka',0)>0.50:
+            if self._fangle(lm, 5, 6, 8) < 154:
+                scores['Pataka'] = 0.0
+            else:
+                scores['Arala'] = 0.0
+
+        # Shukatunda vs Arala — ring bent decides
+        if scores.get('Shukatunda',0)>0.50 and scores.get('Arala',0)>0.50:
+            if self._bent(lm, 13, 14, 16, 132):
+                scores['Arala'] = 0.0
+            else:
+                scores['Shukatunda'] = 0.0
+
+        # Ardhapataka vs Trishula — middle finger state
+        if scores.get('Ardhapataka',0)>0.50 and scores.get('Trishula',0)>0.50:
+            if self._bent(lm, 17, 18, 20, 130):
+                scores['Trishula'] = 0.0
+            else:
+                scores['Ardhapataka'] = 0.0
+
+        # Chatura vs Tripataka — index bent
+        if scores.get('Chatura',0)>0.50 and scores.get('Tripataka',0)>0.50:
+            if self._bent(lm,5,6,8,135): zero('Tripataka')
+            else: zero('Chatura')
+
+        # Kartarimukha vs Simhamukha — thumb
+        if scores.get('Kartarimukha',0)>0.50 and scores.get('Simhamukha',0)>0.50:
+            if self._thumb_out(lm,hs): zero('Kartarimukha')
+            else: zero('Simhamukha')
+
+        # Chandrakala vs Suchi — thumb
+        if scores.get('Chandrakala',0)>0.50 and scores.get('Suchi',0)>0.50:
+            if self._thumb_out(lm,hs): zero('Suchi')
+            else: zero('Chandrakala')
+
+        # Chandrakala vs Shikhara — index state
+        if scores.get('Chandrakala',0)>0.50 and scores.get('Shikhara',0)>0.50:
+            if self._extended(lm, 5, 6, 8, 140):
                 scores['Shikhara'] = 0.0
             else:
-                scores['Tamrachuda'] = 0.0
+                scores['Chandrakala'] = 0.0
+
+        # Hamsasya vs Katakamukha — ring+pinky
+        if scores.get('Hamsasya',0)>0.50 and scores.get('Katakamukha',0)>0.50:
+            if (self._extended(lm,13,14,16,132) and
+                self._extended(lm,17,18,20,132)):
+                zero('Hamsasya')
+            else:
+                zero('Katakamukha')
+
+        # Bhramara vs Katakamukha — index curl
+        if scores.get('Bhramara',0)>0.50 and scores.get('Katakamukha',0)>0.50:
+            if self._dist(lm[8],lm[5])/hs < 0.28:
+                zero('Katakamukha')
+            else:
+                zero('Bhramara')
+
+        # Padmakosha vs Alapadma
+        if scores.get('Padmakosha',0)>0.50 and scores.get('Alapadma',0)>0.50:
+            if any([not self._extended(lm,5,6,8,155),
+                    not self._extended(lm,9,10,12,155),
+                    not self._extended(lm,13,14,16,155),
+                    not self._extended(lm,17,18,20,155)]):
+                zero('Alapadma')
+            else:
+                zero('Padmakosha')
+
+        # Kangula vs Padmakosha
+        if scores.get('Kangula',0)>0.50 and scores.get('Padmakosha',0)>0.50:
+            if self._bent(lm,13,14,16,125): zero('Padmakosha')
+            else: zero('Kangula')
+
+        # Mukula vs Sandamsha
+        if scores.get('Mukula',0)>0.50 and scores.get('Sandamsha',0)>0.50:
+            tips=[lm[4],lm[8],lm[12],lm[16],lm[20]]
+            cx=sum(t[0] for t in tips)/5
+            cy=sum(t[1] for t in tips)/5
+            avg=sum(self._dist(t,(cx,cy,0)) for t in tips)/(5*hs)
+            if avg < 0.07: zero('Sandamsha')
+            else: zero('Mukula')
 
         return scores
-    
-    def _apply_temporal_smoothing(self, handedness, current_mudra):
-        """Apply temporal smoothing with hysteresis to prevent flickering"""
+
+    # ─────────────────────────────────────────
+    # TEMPORAL SMOOTHING
+    # ─────────────────────────────────────────
+
+    def _smooth(self, raw, handedness):
         if handedness == 'Left':
-            history = self.left_hand_history
-            confirmed = self.left_confirmed
+            hist = self.left_history
+            conf = self.left_confirmed
         else:
-            history = self.right_hand_history
-            confirmed = self.right_confirmed
-        
-        # Add current mudra to history
-        history.append(current_mudra)
-        
-        # Hysteresis logic
-        if confirmed is not None:
-            confirmed_count = history.count(confirmed)
-            if confirmed_count >= 3:  # RELEASE_THRESH = 3
-                confirmed = None  # release it
-        
-        # Get most common mudra
-        if history:
-            candidate = Counter(history).most_common(1)[0][0]
-            candidate_count = history.count(candidate)
-            
-            # Confirm new mudra after 4/7 frames
-            if confirmed is None and candidate_count >= 4:  # CONFIRM_THRESH = 4
-                confirmed = candidate
-        else:
-            candidate = "Unknown"
-        
-        # Update confirmed state
+            hist = self.right_history
+            conf = self.right_confirmed
+
+        # Don't let Unknown flush history quickly
+        if raw == 'Unknown':
+            unk_count = sum(1 for x in hist if x == 'Unknown')
+            if unk_count < 4 and hist:
+                raw = hist[-1]
+
+        hist.append(raw)
+
+        if conf is not None:
+            if hist.count(conf) >= self.RELEASE_THRESH:
+                pass  # keep confirmed
+            else:
+                conf = None
+
+        if conf is None:
+            cand = Counter(hist).most_common(1)[0][0]
+            if hist.count(cand) >= self.CONFIRM_THRESH:
+                conf = cand
+
         if handedness == 'Left':
-            self.left_confirmed = confirmed
+            self.left_confirmed = conf
         else:
-            self.right_confirmed = confirmed
-        
-        return confirmed if confirmed is not None else candidate
-        
-        # Extract finger states and angles
-        for finger_name in ['thumb', 'index', 'middle', 'ring', 'pinky']:
-            angle = self.get_finger_angle(landmarks, finger_name)
-            state = self.get_finger_state_from_angle(angle)
-            
-            features['finger_angles'][finger_name] = angle
-            features['finger_states'][finger_name] = state
-        
-        # Calculate finger spread
-        features['finger_spread'] = self.get_finger_spread(landmarks)
-        
-        # Calculate thumb-index distance
-        thumb_tip = landmarks[self.finger_tip_indices['thumb']]
-        index_tip = landmarks[self.finger_tip_indices['index']]
-        features['thumb_index_distance'] = self.calculate_distance(thumb_tip, index_tip)
-        
-        # Calculate palm orientation (simplified)
-        wrist = landmarks[0]
-        middle_mcp = landmarks[self.finger_mcp_indices['middle']]
-        features['palm_orientation'] = math.atan2(middle_mcp[1] - wrist[1], middle_mcp[0] - wrist[0])
-        
-        return features
-    
-    def _init_mudra_rules(self):
-        """Initialize comprehensive mudra rules dictionary"""
-        self.mudra_rules = {
-            "Pataka": {
-                "extended": ["thumb", "index", "middle", "ring", "pinky"]
-            },
-            "Tripataka": {
-                "extended": ["thumb", "index", "middle", "pinky"],
-                "bent": ["ring"]
-            },
-            "Ardhapataka": {
-                "extended": ["thumb", "index", "middle", "ring"],
-                "bent": ["pinky"]
-            },
-            "Kartarimukha": {
-                "extended": ["thumb", "index", "middle"],
-                "bent": ["ring", "pinky"],
-                "thumb_index_touch": True
-            },
-            "Mayura": {
-                "extended": ["thumb", "pinky"],
-                "bent": ["index", "middle", "ring"],
-                "thumb_pinky_touch": True
-            },
-            "Ardhachandra": {
-                "extended": ["thumb", "index", "middle", "ring", "pinky"],
-                "thumb_extended_outward": True
-            },
-            "Arala": {
-                "extended": ["thumb", "index", "middle", "ring"],
-                "half-bent": ["pinky"]
-            },
-            "Shukatunda": {
-                "extended": ["thumb", "index"],
-                "bent": ["middle", "ring", "pinky"]
-            },
-            "Mushti": {
-                "bent": ["thumb", "index", "middle", "ring", "pinky"]
-            },
-            "Shikhara": {
-                "extended": ["thumb"],
-                "bent": ["index", "middle", "ring", "pinky"]
-            },
-            "Kapitta": {
-                "extended": ["thumb"],
-                "half-bent": ["index", "middle", "ring", "pinky"],
-                "thumb_index_touch": True
-            },
-            "Katakamukha": {
-                "extended": ["index", "middle"],
-                "bent": ["thumb", "ring", "pinky"],
-                "thumb_middle_touch": True
-            },
-            "Suchi": {
-                "extended": ["thumb", "index"],
-                "bent": ["middle", "ring", "pinky"]
-            },
-            "Chandrakala": {
-                "extended": ["thumb", "index"],
-                "bent": ["middle", "ring", "pinky"],
-                "thumb_index_circle": True
-            },
-            "Padmakosha": {
-                "fingertips_touch": True
-            },
-            "Sarpashirsha": {
-                "extended": ["index", "middle", "ring", "pinky"],
-                "bent": ["thumb"],
-                "fingers_curved": True
-            },
-            "Mrigashirsha": {
-                "extended": ["thumb", "index", "middle"],
-                "bent": ["ring", "pinky"],
-                "thumb_middle_touch": True
-            },
-            "Simhamukha": {
-                "extended": ["thumb", "index", "middle"],
-                "bent": ["ring", "pinky"],
-                "thumb_index_spread": True
-            },
-            "Kangula": {
-                "extended": ["index"],
-                "bent": ["thumb", "middle", "ring", "pinky"],
-                "thumb_curved": True
-            },
-            "Alapadma": {
-                "extended": ["thumb", "index", "middle", "ring", "pinky"],
-                "finger_spread_high": True
-            },
-            "Chatura": {
-                "extended": ["thumb", "index", "middle", "pinky"],
-                "bent": ["ring"]
-            },
-            "Bhramara": {
-                "extended": ["thumb", "index", "middle", "ring"],
-                "bent": ["pinky"],
-                "thumb_middle_touch": True,
-                "fingers_curved": True
-            },
-            "Hamsasya": {
-                "thumb_index_touch": True,
-                "extended": ["middle", "ring", "pinky"]
-            },
-            "Hamsapaksha": {
-                "extended": ["thumb", "index", "middle"],
-                "bent": ["ring", "pinky"],
-                "thumb_index_angle": 45
-            },
-            "Sandamsha": {
-                "extended": ["thumb", "index"],
-                "bent": ["middle", "ring", "pinky"],
-                "thumb_index_opposite": True
-            },
-            "Mukula": {
-                "fingertips_touch": True
-            },
-            "Tamrachuda": {
-                "extended": ["thumb", "index", "middle"],
-                "bent": ["ring", "pinky"],
-                "thumb_curved": True
-            },
-            "Trishula": {
-                "extended": ["thumb", "index", "middle"],
-                "bent": ["ring", "pinky"],
-                "thumb_spread": True
-            }
-        }
-    
-    def check_mudra_rule(self, mudra_name, features, landmarks):
-        """Check if features match a specific mudra rule"""
-        rule = self.mudra_rules[mudra_name]
-        finger_states = features['finger_states']
-        
-        # Check finger state requirements
-        if 'extended' in rule:
-            for finger in rule['extended']:
-                if finger_states.get(finger) != 'extended':
-                    return False
-        
-        if 'bent' in rule:
-            for finger in rule['bent']:
-                if finger_states.get(finger) != 'bent':
-                    return False
-        
-        if 'half-bent' in rule:
-            for finger in rule['half-bent']:
-                if finger_states.get(finger) != 'half-bent':
-                    return False
-        
-        # Check special conditions
-        if rule.get('thumb_index_touch'):
-            if not self.is_thumb_touching_index(landmarks):
-                return False
-        
-        if rule.get('thumb_pinky_touch'):
-            if not self.is_thumb_touching_pinky(landmarks):
-                return False
-        
-        if rule.get('thumb_middle_touch'):
-            if not self.is_thumb_touching_middle(landmarks):
-                return False
-        
-        if rule.get('fingertips_touch'):
-            if not self.are_fingertips_touching(landmarks):
-                return False
-        
-        if rule.get('thumb_extended_outward'):
-            if not self.is_thumb_extended_outward(landmarks):
-                return False
-        
-        if rule.get('finger_spread_high'):
-            if features['finger_spread'] <= 0.12:
-                return False
-        
-        if rule.get('fingers_curved'):
-            # Check if fingers are in curved position
-            if not self.are_fingers_curved(landmarks):
-                return False
-        
-        return True
-    
-    def is_thumb_touching_pinky(self, landmarks):
-        """Check if thumb tip is touching pinky tip"""
-        thumb_tip = landmarks[self.finger_tip_indices['thumb']]
-        pinky_tip = landmarks[self.finger_tip_indices['pinky']]
-        distance = self.calculate_distance(thumb_tip, pinky_tip)
-        return distance < 0.05
-    
-    def is_thumb_touching_middle(self, landmarks):
-        """Check if thumb tip is touching middle tip"""
-        thumb_tip = landmarks[self.finger_tip_indices['thumb']]
-        middle_tip = landmarks[self.finger_tip_indices['middle']]
-        distance = self.calculate_distance(thumb_tip, middle_tip)
-        return distance < 0.05
-    
-    def are_fingers_curved(self, landmarks):
-        """Check if fingers are in curved position"""
-        curved_count = 0
-        for finger in ['index', 'middle', 'ring', 'pinky']:
-            angle = self.get_finger_angle(landmarks, finger)
-            if 120 < angle < 160:  # Curved but not fully bent
-                curved_count += 1
-        return curved_count >= 2
-    
-    def get_finger_spread(self, landmarks):
-        index_tip = landmarks[self.finger_tip_indices['index']]
-        middle_tip = landmarks[self.finger_tip_indices['middle']]
-        ring_tip = landmarks[self.finger_tip_indices['ring']]
-        pinky_tip = landmarks[self.finger_tip_indices['pinky']]
-        
-        spread_1 = self.calculate_distance(index_tip, middle_tip)
-        spread_2 = self.calculate_distance(middle_tip, ring_tip)
-        spread_3 = self.calculate_distance(ring_tip, pinky_tip)
-        
-        return (spread_1 + spread_2 + spread_3) / 3
-    
-    def is_thumb_touching_index(self, landmarks):
-        """Check if thumb tip is touching index tip (for Hamsasya)"""
-        thumb_tip = landmarks[self.finger_tip_indices['thumb']]
-        index_tip = landmarks[self.finger_tip_indices['index']]
-        distance = self.calculate_distance(thumb_tip, index_tip)
-        return distance < 0.05
-    
-    def are_fingertips_touching(self, landmarks):
-        """Check if all fingertips are close together (for Mukula)"""
-        thumb_tip = landmarks[self.finger_tip_indices['thumb']]
-        index_tip = landmarks[self.finger_tip_indices['index']]
-        middle_tip = landmarks[self.finger_tip_indices['middle']]
-        ring_tip = landmarks[self.finger_tip_indices['ring']]
-        pinky_tip = landmarks[self.finger_tip_indices['pinky']]
-        
-        # Calculate distances between all fingertip pairs
-        distances = [
-            self.calculate_distance(thumb_tip, index_tip),
-            self.calculate_distance(index_tip, middle_tip),
-            self.calculate_distance(middle_tip, ring_tip),
-            self.calculate_distance(ring_tip, pinky_tip)
-        ]
-        
-        # All distances should be small for fingertips to be touching
-        return all(dist < 0.08 for dist in distances)
-    
-    def is_thumb_extended_outward(self, landmarks):
-        """Check if thumb is extended outward from hand"""
-        thumb_tip = landmarks[self.finger_tip_indices['thumb']]
-        index_tip = landmarks[self.finger_tip_indices['index']]
-        
-        thumb_index_distance = self.calculate_distance(thumb_tip, index_tip)
-        return thumb_index_distance > 0.15
-    
-    def apply_temporal_smoothing(self, hand_type, current_mudra):
-        """Apply temporal smoothing with 7-frame window and majority voting"""
-        if hand_type == 'Left':
-            self.left_hand_history.append(current_mudra)
-            history = self.left_hand_history
-        else:
-            self.right_hand_history.append(current_mudra)
-            history = self.right_hand_history
-        
-        if len(history) < 4:
-            return current_mudra
-        
-        # Use majority voting for stability
-        mudra_counts = {}
-        for mudra in history:
-            mudra_counts[mudra] = mudra_counts.get(mudra, 0) + 1
-        
-        # Return the most frequent mudra
-        most_frequent = max(mudra_counts.items(), key=lambda x: x[1])[0]
-        confidence = mudra_counts[most_frequent] / len(history)
-        
-        # Store confidence for debugging
-        self.last_confidence = confidence
-        
-        return most_frequent
-    
-    def recognize_mudra(self, landmarks, hand_type='Right'):
-        """Main mudra recognition function with improved accuracy"""
+            self.right_confirmed = conf
+
+        return conf if conf else Counter(hist).most_common(1)[0][0]
+
+    # ─────────────────────────────────────────
+    # PUBLIC API
+    # ─────────────────────────────────────────
+
+    def recognize_single(self, landmarks, handedness, debug=False):
         if not landmarks or len(landmarks) != 21:
-            return "Unknown"
-        
-        # Step 1: Normalize hand orientation for consistent behavior
-        normalized_landmarks = self.normalize_hand_orientation(landmarks, hand_type)
-        
-        # Step 2: Extract comprehensive features
-        features = self.extract_hand_features(normalized_landmarks)
-        
-        # Store features for debugging
-        self.last_features = features
-        
-        # Step 3: Check mudra rules
-        for mudra_name in self.mudra_rules.keys():
-            if self.check_mudra_rule(mudra_name, features, normalized_landmarks):
-                # Apply temporal smoothing
-                return self.apply_temporal_smoothing(hand_type, mudra_name)
-        
-        # No mudra matched
-        return self.apply_temporal_smoothing(hand_type, "Unknown")
-    
+            return ('Unknown', 0.0, {}) if debug else ('Unknown', 0.0)
+
+        lm = self._normalize(landmarks, handedness)
+        hs = self._hand_size(lm)
+
+        groups, flags = self._get_groups(lm, hs)
+
+        candidates = set()
+        for g in groups:
+            candidates.update(self.GROUPS.get(g, []))
+
+        scores = {}
+        for name in candidates:
+            fn_name = self.SCORERS.get(name)
+            if fn_name:
+                scores[name] = getattr(self, fn_name)(lm, hs)
+
+        # Smooth display buffer
+        dbuf = (self.display_scores_right if handedness=='Right'
+                else self.display_scores_left)
+        for name, sc in scores.items():
+            dbuf[name] = (self.DISPLAY_ALPHA * sc +
+                          (1-self.DISPLAY_ALPHA) * dbuf.get(name, sc))
+        for name in list(dbuf.keys()):
+            if name not in scores:
+                dbuf[name] *= 0.85
+                if dbuf[name] < 0.05:
+                    del dbuf[name]
+
+        if scores:
+            scores = self._tiebreak(scores, lm, hs)
+            best = max(scores, key=scores.get)
+            best_score = scores[best]
+            raw = best if best_score >= 0.58 else 'Unknown'
+        else:
+            raw = 'Unknown'
+            best_score = 0.0
+
+        final = self._smooth(raw, handedness)
+
+        if debug:
+            top5 = sorted(dbuf.items(), key=lambda x:x[1], reverse=True)[:5]
+            return (final, best_score, {
+                'stage1_groups': groups,
+                'flags': flags,
+                'top5': top5,
+                'finger_angles': self._finger_angles(lm),
+                'thumb_state': 'tucked' if flags['thumb_tuck'] else 'extended',
+                'hand_size': hs,
+                'candidates': list(candidates),
+            })
+
+        return (final, best_score)
+
+    def recognize_two_hand(self, hand1, hand2):
+        r1 = self.recognize_single(hand1[0], hand1[1])
+        r2 = self.recognize_single(hand2[0], hand2[1])
+        return r1 if r1[1] >= r2[1] else r2
+
     def get_debug_info(self):
-        """Get comprehensive debugging information"""
-        debug_info = {
-            'finger_states': self.last_features.get('finger_states', {}),
-            'finger_angles': self.last_features.get('finger_angles', {}),
-            'confidence': self.last_confidence,
-            'finger_spread': self.last_features.get('finger_spread', 0),
-            'thumb_index_distance': self.last_features.get('thumb_index_distance', 0)
-        }
-        return debug_info
+        return {}
