@@ -96,19 +96,26 @@ class MudraRecognizer:
     # ─────────────────────────────────────────
 
     def _get_groups(self, lm, hs):
-        fe  = self._four_ext(lm, 142)
-        fb  = self._four_bent(lm, 118)
-        to  = self._thumb_out(lm, hs)
-        tt  = self._thumb_tucked(lm, hs)
-        p48 = self._touching(lm, 4, 8, hs, 0.16)   # thumb-index pinch
-        ie  = self._extended(lm, 5, 6, 8, 138)
-        me  = self._extended(lm, 9, 10, 12, 138)
-        re  = self._extended(lm, 13, 14, 16, 138)
-        pe  = self._extended(lm, 17, 18, 20, 138)
-        ec  = sum([ie, me, re, pe])
-        ring_bent = not re  # ring finger is bent if not extended
+        fe   = self._four_ext(lm, 142)
+        fb   = self._four_bent(lm, 118)
+        to   = self._thumb_out(lm, hs)
+        tt   = self._thumb_tucked(lm, hs)
+        p48  = self._touching(lm, 4, 8, hs, 0.16)
+        p416 = self._touching(lm, 4, 16, hs, 0.20)
+        ie   = self._extended(lm, 5, 6, 8, 138)
+        me   = self._extended(lm, 9, 10, 12, 138)
+        re   = self._extended(lm, 13, 14, 16, 138)
+        pe   = self._extended(lm, 17, 18, 20, 138)
+        ec   = sum([ie, me, re, pe])
 
-        # drooping: tip y > DIP y
+        # Use raw angle for ring — more reliable than threshold
+        ring_angle = self._fangle(lm, 13, 14, 16)
+        ring_bent  = ring_angle < 158  # even slightly bent
+
+        # Index angle for curved detection
+        idx_angle  = self._fangle(lm, 5, 6, 8)
+        idx_curved_shape = (105 < idx_angle < 158)
+
         droop = sum([
             lm[8][1]  > lm[7][1],
             lm[12][1] > lm[11][1],
@@ -117,91 +124,102 @@ class MudraRecognizer:
         ])
 
         groups = []
-        flags  = {
-            'four_ext':fe,'four_bent':fb,
-            'thumb_ext':to,'thumb_tuck':tt,
-            'pinch_14':p48,'ext_count':ec,'droop':droop
+        flags = {
+            'four_ext': fe, 'four_bent': fb,
+            'thumb_ext': to, 'thumb_tuck': tt,
+            'pinch_14': p48, 'ext_count': ec,
+            'droop': droop, 'ring_bent': ring_bent,
+            'ring_angle': ring_angle, 'idx_angle': idx_angle,
         }
 
-        if fe and to and droop < 2:    groups.append('all_open')
+        # ── OPEN HAND GROUPS ──────────────────────────
+        # four_open: ALL fingers straight, thumb tucked
+        # Only fires if ring is NOT bent (else Tripataka)
         if fe and tt and droop < 2 and not ring_bent:
             groups.append('four_open')
-        if fe and droop >= 2:          groups.append('drooping')
-        if fb:                         groups.append('fist')
-        # Ring-thumb touch = Mayura territory
-        p416 = self._touching(lm, 4, 16, hs, 0.20)
+
+        # all_open: ALL fingers straight, thumb out
+        if fe and to and droop < 2:
+            groups.append('all_open')
+
+        # drooping: fingers extended but tips drooping
+        if fe and droop >= 2:
+            groups.append('drooping')
+
+        # ring_bent: 3 fingers up, ring bent (Tripataka/Trishula)
+        # Only fire if index+middle+pinky are extended
+        if ring_bent and ie and me and pe and droop < 2:
+            sp = self._spread(lm, 5, 17, hs)
+            if sp <= 0.55:
+                groups.append('ring_bent_together')  # Tripataka
+            else:
+                groups.append('ring_bent_spread')    # Trishula
+
+        # ── FIST GROUPS ───────────────────────────────
+        if fb:
+            groups.append('fist')
+
+        # ── PINCH GROUPS ──────────────────────────────
+        if p48:
+            groups.append('pinch')
         if p416:
             groups.append('ring_pinch')
-        
-        if p48:                        groups.append('pinch')
-        if ec == 1:                    groups.append('one_up')
-        if ec == 2:                    groups.append('two_up')
-        if ec == 3:                    groups.append('three_up')
-        
-        # Ring bent but index+middle+pinky extended = Tripataka territory
-        ring_bent = self._fangle(lm, 13, 14, 16) < 158
-        if ring_bent:
-            groups.append('ring_bent')
 
-        # Index+middle up only (not pinky) = Ardhapataka
-        idx_mid_only = (ie and me and not re and not pe)
-        if idx_mid_only:
-            groups.append('idx_mid_up')
-        
-        # Index+Middle both extended AND spread = Kartarimukha
-        idx_mid_spread = (ie and me and not re and not pe and
-                          self._spread(lm, 5, 9, hs) > 0.15)
-        if idx_mid_spread:
-            groups.append('idx_mid_spread')
+        # ── TWO FINGER GROUPS ─────────────────────────
+        # Use TIP spread (lm[8] to lm[12]) to separate
+        # Ardhapataka (tips together) from Kartarimukha (tips spread)
+        tip_spread_812 = self._dist(lm[8], lm[12]) / hs
 
+        if ie and me and not re and not pe:
+            if tip_spread_812 <= 0.32:
+                groups.append('idx_mid_up')     # Ardhapataka
+            else:
+                groups.append('idx_mid_spread') # Kartarimukha
+
+        # index+pinky up, middle+ring bent = Simhamukha
         me_strict = self._extended(lm, 9, 10, 12, 148)
-        idx_pinky_up = (ie and not me_strict and not re and pe)
-        if idx_pinky_up:
+        if ie and not me_strict and not re and pe:
             groups.append('idx_pinky_up')
-        
-        # Index curved but others straight = Arala territory
-        idx_curved = (self._fangle(lm, 5, 6, 8) < 158 and
-                      self._fangle(lm, 5, 6, 8) > 105 and
-                      self._extended(lm, 9, 10, 12, 138) and
-                      self._extended(lm, 13, 14, 16, 138))
-        if idx_curved:
+
+        # ── CURVED INDEX GROUPS ───────────────────────
+        # idx_curved: index curved, middle+ring extended
+        # Includes BOTH Arala (ring extended) and
+        # Shukatunda (ring bent) — scoring functions
+        # distinguish them internally
+        if (idx_curved_shape and
+                self._extended(lm, 9, 10, 12, 132)):
             groups.append('idx_curved')
-        
-        # Index up + thumb out = Chandrakala territory
-        idx_up_thumb_out = (ie and not me and not re
-                            and not pe and to)
-        if idx_up_thumb_out:
+
+        # ── ONE FINGER UP GROUPS ──────────────────────
+        # index up + thumb out = Chandrakala
+        if ie and not me and not re and not pe and to:
             groups.append('idx_up_thumb_out')
 
-        # Index up + thumb tucked = Suchi territory
-        idx_up_thumb_in = (ie and not me and not re
-                           and not pe and tt)
-        if idx_up_thumb_in:
+        # index up + thumb tucked = Suchi
+        if ie and not me and not re and not pe and tt:
             groups.append('idx_up_thumb_in')
-        
-        # Three middle fingers bent + pinky up = Mrigashirsha/Hamsapaksha
-        three_mid_bent_pinky_up = (
-            self._bent(lm, 5, 6, 8, 135) and
-            self._bent(lm, 9, 10, 12, 135) and
-            self._bent(lm, 13, 14, 16, 135) and
-            self._extended(lm, 17, 18, 20, 132)
-        )
-        if three_mid_bent_pinky_up:
+
+        # ── THREE BENT + PINKY UP ─────────────────────
+        if (self._bent(lm, 5, 6, 8, 135) and
+                self._bent(lm, 9, 10, 12, 135) and
+                self._bent(lm, 13, 14, 16, 135) and
+                self._extended(lm, 17, 18, 20, 132)):
             groups.append('three_mid_bent_pinky_up')
-        
-        flags.update({
-            'ring_bent': ring_bent,
-            'idx_mid_only': idx_mid_only,
-        })
-        
-        if not groups:                 groups.append('mixed')
+
+        # ── EXT COUNT FALLBACKS ───────────────────────
+        if ec == 3:
+            groups.append('three_up')
+
+        if not groups:
+            groups.append('mixed')
 
         return groups, flags
 
     GROUPS = {
         'all_open':              ['Alapadma', 'Ardhachandra', 'Arala'],
         'four_open':             ['Pataka', 'Tripataka'],
-        'ring_bent':             ['Tripataka', 'Trishula'],
+        'ring_bent_together': ['Tripataka'],
+        'ring_bent_spread':   ['Trishula'],
         'idx_mid_up':            ['Ardhapataka'],
         'idx_mid_spread':        ['Kartarimukha'],
         'idx_pinky_up':          ['Simhamukha'],
@@ -287,13 +305,14 @@ class MudraRecognizer:
         return min(s, 1.0)
 
     def _s_ardhapataka(self, lm, hs):
-        """Index+Middle extended TOGETHER. Ring+Pinky bent."""
+        """Index+Middle extended TOGETHER (tips close). Ring+Pinky bent."""
         if not self._bent(lm, 13, 14, 16, 132): return 0.0
         if not self._bent(lm, 17, 18, 20, 132): return 0.0
         if not self._extended(lm, 5, 6, 8, 135): return 0.0
         if not self._extended(lm, 9, 10, 12, 135): return 0.0
-        # Loosened from 0.22 to 0.28
-        if self._spread(lm, 5, 9, hs) > 0.28: return 0.0
+        # Hard gate: tips must be together
+        tip_spread = self._dist(lm[8], lm[12]) / hs
+        if tip_spread > 0.35: return 0.0
         s = 0.0
         s += 0.28 if self._extended(lm, 5, 6, 8, 148) else 0.15
         s += 0.28 if self._extended(lm, 9, 10, 12, 148) else 0.15
@@ -302,25 +321,19 @@ class MudraRecognizer:
         return min(s, 1.0)
 
     def _s_kartarimukha(self, lm, hs):
-        """Scissors: Index+Middle spread apart (scissors shape).
-        Ring+Pinky bent AND pressed against thumb."""
-        # Hard gate: index must be extended
+        """Index+Middle scissors spread apart. Ring+Pinky bent."""
         if not self._extended(lm, 5, 6, 8, 135): return 0.0
-        # Hard gate: middle must be extended
         if not self._extended(lm, 9, 10, 12, 135): return 0.0
-        # Hard gate: ring must be bent
         if not self._bent(lm, 13, 14, 16, 138): return 0.0
-        # Hard gate: pinky must be bent
         if not self._bent(lm, 17, 18, 20, 138): return 0.0
-        # Hard gate: index+middle must be SPREAD (scissors)
-        if self._spread(lm, 5, 9, hs) < 0.18: return 0.0
+        # Hard gate: tips must be spread apart
+        tip_spread = self._dist(lm[8], lm[12]) / hs
+        if tip_spread < 0.30: return 0.0
         s = 0.0
         s += 0.25 if self._extended(lm, 5, 6, 8, 145) else 0.12
         s += 0.25 if self._extended(lm, 9, 10, 12, 145) else 0.12
-        s += 0.20 if self._bent(lm, 13, 14, 16, 128) else 0.10
-        s += 0.20 if self._bent(lm, 17, 18, 20, 128) else 0.10
-        sp = self._spread(lm, 5, 9, hs)
-        if sp > 0.25: s += 0.10
+        s += 0.25 if self._bent(lm, 13, 14, 16, 128) else 0.10
+        s += 0.25 if self._bent(lm, 17, 18, 20, 128) else 0.10
         return min(s, 1.0)
 
     def _s_mayura(self, lm, hs):
