@@ -696,89 +696,144 @@ def draw_alapadma_lotus(frame, cx, cy, radius, color, now):
 
 def draw_katakamukha_petals(frame, cx, cy,
                              radius, color, now):
-    """Petal shower falling from the three-finger
-    pinch point. Petals are small diamond shapes
-    that appear at pinch and fall downward.
-    Uses a fixed random seed per petal for stable
-    non-flickering positions."""
+    """Real flower petals falling from pinch point.
+    Each flower is drawn as 5 oval ellipse petals
+    arranged around a yellow center — like jasmine
+    or a simple daisy. Petals fall with sideways drift.
+    Flowers are large and clearly recognizable."""
 
-    # Pinch point — between thumb(4), index(8), middle(12)
-    # Approximated as slightly above palm center
     pinch_x = cx
-    pinch_y = cy - int(radius * 0.6)
+    pinch_y = cy - int(radius * 0.5)
 
-    # Soft glow at pinch point
+    # Glow at pinch point
     ov = frame.copy()
     cv2.circle(ov, (pinch_x, pinch_y),
-               int(radius * 0.5), color, -1)
-    cv2.addWeighted(ov, 0.30, frame, 0.70, 0, frame)
+               int(radius*0.50), color, -1)
+    cv2.addWeighted(ov, 0.28, frame, 0.72, 0, frame)
     cv2.circle(frame, (pinch_x, pinch_y),
-               int(radius * 0.2), color, 2)
+               int(radius*0.18), color, 2)
 
-    # Cascading petal stream downward
-    # Each petal at different stage of falling
-    n_petals = 12
+    # Flower petal colors — rose and jasmine
     petal_colors = [
-        (180, 160, 255),  # rose pink
-        (200, 180, 255),  # light pink
-        (160, 140, 240),  # deep pink
+        (160, 130, 255),  # deep rose
+        (190, 155, 255),  # medium rose
+        (210, 185, 255),  # light rose
+        (175, 210, 255),  # jasmine white-pink
+        (140, 195, 240),  # jasmine teal
         (220, 200, 255),  # pale pink
-        (140, 200, 255),  # jasmine white-pink
     ]
+    center_color = (0, 220, 255)   # bright yellow center
 
-    rng = np.random.RandomState(7)
-    for i in range(n_petals):
-        # Each petal has a fixed horizontal drift
-        x_drift  = rng.randint(-int(radius*1.5),
-                                int(radius*1.5))
-        # Fall speed varies per petal
-        fall_spd = 0.4 + rng.random() * 0.6
-        petal_size = rng.randint(4, 10)
+    n_flowers = 10
+    rng = np.random.RandomState(33)
+
+    for i in range(n_flowers):
+        # Fall parameters
+        drift_dir  = rng.uniform(-1.0, 1.0)
+        fall_spd   = 0.30 + rng.random()*0.40
+        petal_long = rng.randint(10, 18)  # ellipse long axis
+        petal_short= int(petal_long * 0.55) # ellipse short axis
         color_idx  = rng.randint(0, len(petal_colors))
+        flower_rot = rng.uniform(0, 2*math.pi)
+        rot_spd    = rng.uniform(-0.4, 0.4)
 
-        # Animate falling using time
-        t = (now * fall_spd + i * 0.7) % 1.0
-        fall_dist = int(t * radius * 4.0)
+        # Animation
+        t = (now * fall_spd + i * 0.70) % 1.0
 
-        px = pinch_x + x_drift
-        py = pinch_y + fall_dist
+        fall_dist  = int(t * radius * 4.2)
+        drift_dist = int(drift_dir * t
+                         * radius * 1.6)
 
-        # Fade as petal falls
-        alpha = max(0, 1.0 - t) * 0.75
+        fx = pinch_x + drift_dist
+        fy = pinch_y + fall_dist
 
-        # Small diamond petal shape
-        s = petal_size
-        pts = np.array([
-            [px,     py - s],   # top
-            [px + s, py],       # right
-            [px,     py + s],   # bottom
-            [px - s, py],       # left
-        ], np.int32).reshape((-1,1,2))
+        # Fade
+        if t < 0.15:
+            alpha = (t/0.15) * 0.88
+        elif t > 0.72:
+            alpha = ((1.0-t)/0.28) * 0.88
+        else:
+            alpha = 0.88
 
-        # Rotate petal slightly based on drift
-        petal_color = petal_colors[color_idx]
+        if alpha < 0.05:
+            continue
+
+        # Current rotation
+        current_rot = flower_rot + now * rot_spd
+        pc = petal_colors[color_idx]
+
+        # ── Draw flower: 5 oval petals ───────────────
+        # Each petal is an ellipse offset from center
+        n_petals  = 5
+        petal_dist = int(petal_long * 0.72)
+
+        for p in range(n_petals):
+            petal_angle = current_rot + \
+                          p*(2*math.pi/n_petals)
+
+            # Petal center position
+            pet_cx = int(fx + math.cos(petal_angle)
+                         * petal_dist)
+            pet_cy = int(fy + math.sin(petal_angle)
+                         * petal_dist)
+
+            # Draw oval petal
+            # Ellipse oriented along petal_angle
+            angle_deg = int(math.degrees(petal_angle))
+
+            ov = frame.copy()
+            cv2.ellipse(ov,
+                (pet_cx, pet_cy),
+                (petal_long, petal_short),
+                angle_deg,
+                0, 360,
+                pc, -1)
+            cv2.addWeighted(ov, alpha,
+                            frame, 1-alpha,
+                            0, frame)
+
+            # Petal outline slightly darker
+            darker = tuple(max(0,c-40) for c in pc)
+            cv2.ellipse(frame,
+                (pet_cx, pet_cy),
+                (petal_long, petal_short),
+                angle_deg,
+                0, 360,
+                darker, 1)
+
+        # ── Flower center — bright yellow circle ────
+        center_r = int(petal_long * 0.38)
         ov = frame.copy()
-        cv2.fillPoly(ov, [pts], petal_color)
-        cv2.addWeighted(ov, alpha,
-                        frame, 1-alpha, 0, frame)
-        cv2.polylines(frame, [pts], True,
-                      petal_color, 1)
+        cv2.circle(ov, (int(fx),int(fy)),
+                   center_r, center_color, -1)
+        cv2.addWeighted(ov, alpha*0.95,
+                        frame, 1-alpha*0.95,
+                        0, frame)
 
-    # Garland arc below pinch — decorative curve
+        # Center dot ring — tiny stamens
+        if center_r > 4:
+            for d in range(6):
+                da = d*(2*math.pi/6)+current_rot
+                dx = int(fx + math.cos(da)*center_r*0.65)
+                dy = int(fy + math.sin(da)*center_r*0.65)
+                cv2.circle(frame,(dx,dy),
+                           1,(255,255,255),-1)
+
+    # Garland arc below pinch
     arc_pts = []
-    for t in np.linspace(-math.pi*0.6,
-                          math.pi*0.6, 40):
-        ax = int(pinch_x + math.sin(t)*radius*1.2)
-        ay = int(pinch_y + int(radius*0.8)
-                 + math.cos(t)*radius*0.3)
-        arc_pts.append((ax, ay))
+    for t in np.linspace(-math.pi*0.55,
+                          math.pi*0.55, 35):
+        ax = int(pinch_x + math.sin(t)*radius*1.1)
+        ay = int(pinch_y + int(radius*0.9)
+                 - math.cos(t)*radius*0.25)
+        arc_pts.append((ax,ay))
     if len(arc_pts) > 1:
         ov = frame.copy()
         for i in range(1, len(arc_pts)):
-            cv2.line(ov, arc_pts[i-1], arc_pts[i],
-                     color, 1)
-        cv2.addWeighted(ov, 0.50,
-                        frame, 0.50, 0, frame)
+            cv2.line(ov, arc_pts[i-1],
+                     arc_pts[i], color, 1)
+        cv2.addWeighted(ov, 0.40,
+                        frame, 0.60, 0, frame)
 
 
 def draw_mushti_core(frame, cx, cy,
@@ -901,69 +956,128 @@ def draw_trishula_flames(frame, cx, cy,
                           radius, color, now,
                           tip1=None, tip2=None,
                           tip3=None):
-    """Three independent flame trails from three
-    fingertip landmarks (index=8, middle=12, ring=16).
-    Each fingertip is an independent flame emitter.
-    If landmarks not passed, estimate positions."""
+    # Shiva's trishula: gold metallic shaft + red fire
+    trident_color = (30, 180, 220)   # gold BGR
+    shaft_color   = (40, 200, 230)   # bright gold
+    glow_color    = (20, 140, 180)   # deep gold
 
-    # Estimate fingertip positions if not provided
-    if tip1 is None:
-        tip1 = (cx - int(radius*0.5),
-                cy - int(radius*1.5))
-    if tip2 is None:
-        tip2 = (cx, cy - int(radius*1.8))
-    if tip3 is None:
-        tip3 = (cx + int(radius*0.5),
-                cy - int(radius*1.5))
+    # ── TRIDENT GEOMETRY ─────────────────────────────
 
-    flame_tips = [tip1, tip2, tip3]
+    shaft_len   = int(radius * 2.5)
+    prong_h     = int(radius * 1.8)
+    prong_gap   = int(radius * 0.55)
+    cross_y     = cy - int(radius * 0.6)
 
-    # Each flame has slightly different color
-    flame_colors = [
-        (0,  80, 255),   # deep violet-blue (BGR)
-        (60, 40, 200),   # deep purple
-        (0,  80, 255),   # deep violet-blue
+    # Shaft — vertical center line
+    shaft_bot = cy + int(radius * 0.8)
+    shaft_top = cy - int(radius * 0.5)
+
+    for w, alpha in [(8,0.12),(4,0.25),(2,0.60)]:
+        ov = frame.copy()
+        cv2.line(ov, (cx, shaft_bot),
+                     (cx, shaft_bot - shaft_len),
+                     shaft_color, w)
+        cv2.addWeighted(ov, alpha,
+                        frame, 1-alpha, 0, frame)
+
+    # Three prong bases — spread from shaft top
+    prong_bases = [
+        (cx - prong_gap, shaft_top),  # left
+        (cx,             shaft_top),  # center
+        (cx + prong_gap, shaft_top),  # right
     ]
 
-    def draw_single_flame(frame, fx, fy,
-                          f_color, phase, now):
-        """One flame column above a fingertip."""
-        n_segments = 8
-        flame_h    = int(radius * 2.5)
-        flame_w    = int(radius * 0.35)
+    # Three prong tips — points going up
+    prong_tips = [
+        (cx - prong_gap, shaft_top - prong_h),
+        (cx,             shaft_top - prong_h
+                         - int(radius*0.4)),  # center taller
+        (cx + prong_gap, shaft_top - prong_h),
+    ]
 
-        for seg in range(n_segments):
-            t = seg / n_segments
-            t_next = (seg + 1) / n_segments
+    # Draw prongs
+    for base, tip in zip(prong_bases, prong_tips):
+        for w, alpha in [(6,0.15),(3,0.30),(1,0.75)]:
+            ov = frame.copy()
+            cv2.line(ov, base, tip, trident_color, w)
+            cv2.addWeighted(ov, alpha,
+                            frame, 1-alpha, 0, frame)
 
-            # Width narrows toward tip
-            w1 = int(flame_w * (1.0 - t) * 0.8)
-            w2 = int(flame_w * (1.0 - t_next) * 0.8)
+    # Prong curve tips — small outward hooks
+    for i, (base, tip) in enumerate(
+            zip(prong_bases, prong_tips)):
+        if i != 1:  # only outer prongs get hooks
+            hook_dir = -1 if i == 0 else 1
+            hook_x = tip[0] + hook_dir*int(radius*0.25)
+            hook_y = tip[1] + int(radius*0.20)
+            ov = frame.copy()
+            cv2.line(ov, tip,
+                         (hook_x, hook_y),
+                         trident_color, 2)
+            cv2.addWeighted(ov, 0.65,
+                            frame, 0.35, 0, frame)
 
-            # Flame wobble
-            wobble1 = int(math.sin(
-                now*4 + t*6 + phase) * flame_w*0.4)
-            wobble2 = int(math.sin(
-                now*4 + t_next*6 + phase)*flame_w*0.4)
+    # Crossbar connecting outer prong bases
+    ov = frame.copy()
+    cv2.line(ov,
+        (prong_bases[0][0], cross_y),
+        (prong_bases[2][0], cross_y),
+        trident_color, 2)
+    cv2.addWeighted(ov, 0.65,
+                    frame, 0.35, 0, frame)
 
-            y1 = int(fy - t * flame_h)
-            y2 = int(fy - t_next * flame_h)
-            x1 = fx + wobble1
-            x2 = fx + wobble2
+    # Second crossbar slightly below
+    cross_y2 = cross_y + int(radius*0.3)
+    ov = frame.copy()
+    cv2.line(ov,
+        (prong_bases[0][0] - int(radius*0.1),
+         cross_y2),
+        (prong_bases[2][0] + int(radius*0.1),
+         cross_y2),
+        trident_color, 1)
+    cv2.addWeighted(ov, 0.40,
+                    frame, 0.60, 0, frame)
 
-            # Flame segment polygon
+    # ── FLAMES AT PRONG TIPS ─────────────────────────
+
+    flame_colors = [
+        (0,   40, 180),   # deep red
+        (0,   80, 220),   # bright red
+        (20, 130, 240),   # orange-red
+        (40, 170, 245),   # orange
+        (60, 200, 255),   # bright orange tip
+    ]
+
+    for i, tip in enumerate(prong_tips):
+        tip_x, tip_y = tip
+        phase = i * 1.3
+
+        # Flame height varies
+        f_h = int(radius * (1.2 if i==1 else 0.9))
+        f_w = int(radius * 0.22)
+
+        for seg in range(6):
+            t      = seg / 6
+            t_next = (seg+1) / 6
+            y1 = int(tip_y - t * f_h)
+            y2 = int(tip_y - t_next * f_h)
+            w1 = int(f_w * (1.0-t))
+            w2 = int(f_w * (1.0-t_next))
+            wb1 = int(math.sin(
+                now*5+t*4+phase)*f_w*0.35)
+            wb2 = int(math.sin(
+                now*5+t_next*4+phase)*f_w*0.35)
+
             seg_pts = np.array([
-                [x1-w1, y1],
-                [x1+w1, y1],
-                [x2+w2, y2],
-                [x2-w2, y2],
+                [tip_x-w1, y1],
+                [tip_x+w1, y1],
+                [tip_x+w2+wb2, y2],
+                [tip_x-w2+wb2, y2],
             ], np.int32).reshape((-1,1,2))
 
-            # Alpha fades toward tip
-            alpha = (1.0 - t) * 0.65
-            brightness = 1.0 - t * 0.6
-            fc = tuple(int(c*brightness)
-                       for c in f_color)
+            fc_idx = min(seg, len(flame_colors)-1)
+            fc = flame_colors[fc_idx]
+            alpha = (1.0-t) * 0.65
 
             ov = frame.copy()
             cv2.fillPoly(ov, [seg_pts], fc)
@@ -971,212 +1085,203 @@ def draw_trishula_flames(frame, cx, cy,
                             frame, 1-alpha,
                             0, frame)
 
-        # Bright base glow at fingertip
+        # Glow at tip
         ov = frame.copy()
-        cv2.circle(ov, (fx,fy),
-                   int(radius*0.25), f_color, -1)
-        cv2.addWeighted(ov, 0.60,
-                        frame, 0.40, 0, frame)
+        cv2.circle(ov, (tip_x, tip_y),
+                   int(radius*0.20), glow_color, -1)
+        cv2.addWeighted(ov, 0.55,
+                        frame, 0.45, 0, frame)
 
-        # White hot core at base
-        cv2.circle(frame, (fx,fy),
-                   int(radius*0.10),
-                   (255,255,255), -1)
-
-    # Draw all three flames
-    for i, (tip, fc) in enumerate(
-            zip(flame_tips, flame_colors)):
-        draw_single_flame(frame, tip[0], tip[1],
-                          fc, i * 1.2, now)
-
-    # Trident shaft below palm
-    shaft_top_y    = cy
-    shaft_bottom_y = cy + int(radius * 1.5)
+    # ── SHAFT GLOW ───────────────────────────────────
     ov = frame.copy()
-    cv2.line(ov, (cx, shaft_top_y),
-                 (cx, shaft_bottom_y), color, 3)
-    cv2.addWeighted(ov, 0.70, frame, 0.30, 0, frame)
-
-    # Crossbar on shaft
-    cross_y = cy + int(radius * 0.5)
-    ov = frame.copy()
-    cv2.line(ov,
-        (cx - int(radius*0.6), cross_y),
-        (cx + int(radius*0.6), cross_y),
-        color, 2)
-    cv2.addWeighted(ov, 0.60, frame, 0.40, 0, frame)
+    cv2.circle(ov, (cx, shaft_bot),
+               int(radius*0.45), glow_color, -1)
+    cv2.addWeighted(ov, 0.25,
+                    frame, 0.75, 0, frame)
 
 
 def draw_tamrachuda_crest(frame, cx, cy,
-                               radius, color, now):
-        """Rooster: proud crowing bird visual.
-        Sharp upward crest spike + spread tail feathers
-        fanning downward behind hand.
-        Fire-red and gold rooster colors."""
+                           radius, color, now):
+    """Clear rooster silhouette:
+    - Large sharp beak pointing right
+    - Rooster comb: 3 bumps on top
+    - Bright eye dot
+    - Tail feathers fanning left/down
+    - Body glow at palm center
+    Fire-red colors throughout."""
 
-        # ── Upward crest spike (rooster comb) ───────
-        crest_h   = int(radius * 3.0)
-        crest_top = cy - crest_h
-        pulse     = (math.sin(now*3.0)+1)/2
+    pulse = (math.sin(now*2.5)+1)/2
 
-        # Crest glow
-        for w, alpha in [(12,0.12),(7,0.22),(3,0.55)]:
-            ov = frame.copy()
-            cv2.line(ov, (cx,cy),
-                        (cx, crest_top), color, w)
-            cv2.addWeighted(ov, alpha,
-                            frame, 1-alpha, 0, frame)
-        cv2.line(frame, (cx,cy),
-                         (cx, crest_top), color, 1)
+    # ── ROOSTER BODY GLOW ────────────────────────────
+    body_r = int(radius * 1.0)
+    ov = frame.copy()
+    cv2.circle(ov, (cx,cy), body_r, color, -1)
+    cv2.addWeighted(ov, 0.20, frame, 0.80, 0, frame)
 
-        # Crest tip — bright spike
+    # ── BEAK — large sharp triangle ──────────────────
+    beak_color  = (0, 80, 220)   # rooster red
+    beak_length = int(radius * 2.0)
+    beak_width  = int(radius * 0.45)
+
+    beak_tip_x  = cx + beak_length
+    beak_tip_y  = cy - int(radius * 0.1)
+    beak_top_x  = cx + int(radius * 0.3)
+    beak_top_y  = cy - beak_width
+    beak_bot_x  = cx + int(radius * 0.3)
+    beak_bot_y  = cy + int(beak_width * 0.5)
+
+    beak_pts = np.array([
+        [beak_top_x, beak_top_y],
+        [beak_tip_x, beak_tip_y],
+        [beak_bot_x, beak_bot_y],
+    ], np.int32).reshape((-1,1,2))
+
+    ov = frame.copy()
+    cv2.fillPoly(ov, [beak_pts], beak_color)
+    cv2.addWeighted(ov, 0.85,
+                    frame, 0.15, 0, frame)
+    cv2.polylines(frame, [beak_pts],
+                  True, (0,120,255), 1)
+
+    # Beak glow
+    ov = frame.copy()
+    cv2.fillPoly(ov, [beak_pts], beak_color)
+    cv2.addWeighted(ov, 0.20,
+                    frame, 0.80, 0, frame)
+
+    # ── EYE — bright white with pupil ────────────────
+    eye_x = cx + int(radius * 0.55)
+    eye_y = cy - int(radius * 0.45)
+
+    # Eye white
+    ov = frame.copy()
+    cv2.circle(ov, (eye_x, eye_y),
+               int(radius*0.18), (255,255,255), -1)
+    cv2.addWeighted(ov, 0.90,
+                    frame, 0.10, 0, frame)
+    # Pupil
+    cv2.circle(frame, (eye_x, eye_y),
+               int(radius*0.09), (0,0,0), -1)
+    # Eye glow ring
+    ov = frame.copy()
+    cv2.circle(ov, (eye_x, eye_y),
+               int(radius*0.25), beak_color, 1)
+    cv2.addWeighted(ov, 0.50,
+                    frame, 0.50, 0, frame)
+
+    # ── COMB — 3 bumps on top of head ────────────────
+    comb_color = (0, 60, 220)  # deep red
+    comb_base_y = cy - int(radius * 0.6)
+    comb_x_positions = [
+        cx + int(radius*0.4),
+        cx + int(radius*0.15),
+        cx - int(radius*0.1),
+    ]
+    comb_heights = [
+        int(radius * 1.1),
+        int(radius * 0.85),
+        int(radius * 0.65),
+    ]
+
+    for i, (comb_x, comb_h) in enumerate(
+            zip(comb_x_positions, comb_heights)):
+        # Animate comb with slight wobble
+        wobble = int(math.sin(now*3+i)*radius*0.05)
+        comb_tip_y = comb_base_y - comb_h + wobble
+
+        comb_pts = np.array([
+            [comb_x - int(radius*0.12),
+             comb_base_y],
+            [comb_x,
+             comb_tip_y],
+            [comb_x + int(radius*0.12),
+             comb_base_y],
+        ], np.int32).reshape((-1,1,2))
+
         ov = frame.copy()
-        cv2.circle(ov, (cx, crest_top),
-                   int(radius*0.20), color, -1)
+        cv2.fillPoly(ov, [comb_pts], comb_color)
         cv2.addWeighted(ov, 0.80,
                         frame, 0.20, 0, frame)
 
-        # Crest side spurs — rooster comb bumps
-        n_spurs = 3
-        for i in range(n_spurs):
-            spur_y = crest_top + int(
-                (i+1) * crest_h * 0.22)
-            spur_w = int(radius * (0.25 - i*0.05))
-            spur_h = int(radius * (0.30 - i*0.06))
-            # Left spur
-            ov = frame.copy()
-            cv2.ellipse(ov,
-                (cx - spur_w, spur_y),
-                (spur_w, spur_h),
-                0, 180, 360, color, -1)
-            cv2.addWeighted(ov, 0.55,
-                            frame, 0.45, 0, frame)
-
-        # ── Tail feathers fanning downward ──────────
-        # Rooster tail fans out and DOWN behind bird
-        tail_colors = [
-            (0,   70, 200),   # deep red
-            (0,  110, 230),   # bright red
-            (0,  150, 240),   # orange-red
-            (20, 180, 230),   # orange
-            (40, 200, 200),   # gold-orange
-        ]
-
-        n_tail = 10
-        for i in range(n_tail):
-            t = i / (n_tail-1)
-            # Fan from lower-left to lower-right
-            angle = math.radians(
-                120 + t*120)  # 120 to 240 degrees
-            # Tail length varies
-            center_t = 1.0 - abs(t-0.5)*2
-            t_len = int(radius*(1.6 + center_t*1.2))
-
-            # Animate tail with gentle wave
-            wave = math.sin(now*1.2 + i*0.5)*0.06
-            angle += wave
-
-            tip_x = int(cx + math.cos(angle)*t_len)
-            tip_y = int(cy + math.sin(angle)*t_len)
-
-            # Curved feather line
-            ctrl_x = int(cx + math.cos(angle)*t_len*0.5
-                + math.cos(angle+math.pi/2)*radius*0.3)
-            ctrl_y = int(cy + math.sin(angle)*t_len*0.5
-                + math.sin(angle+math.pi/2)*radius*0.3)
-
-            f_pts = []
-            for s in range(20):
-                st = s/19
-                bx = int((1-st)**2*cx
-                         + 2*(1-st)*st*ctrl_x
-                         + st**2*tip_x)
-                by = int((1-st)**2*cy
-                         + 2*(1-st)*st*ctrl_y
-                         + st**2*tip_y)
-                f_pts.append((bx,by))
-
-            color_idx = int(
-                t*(len(tail_colors)-1))
-            fc = tail_colors[color_idx]
-            alpha = 0.50 + center_t*0.30
-
-            ov = frame.copy()
-            for j in range(1, len(f_pts)):
-                fade = 1.0 - j/len(f_pts)
-                fc_fade = tuple(
-                    int(c*fade) for c in fc)
-                cv2.line(ov,
-                    f_pts[j-1], f_pts[j],
-                    fc_fade, 2)
-            cv2.addWeighted(ov, alpha,
-                            frame, 1-alpha,
-                            0, frame)
-
-            # Dot at feather tip
-            if center_t > 0.3:
-                cv2.circle(frame,
-                    (tip_x,tip_y), 2, fc, -1)
-
-        # ── Bird beak aura ───────────────────────────
-        # Sharp triangular beak pointing forward
-        # from the index finger area
-        # Beak direction: forward/right from hand
-        # Color: bright red for rooster
-
-        beak_color = (0, 60, 220)   # rooster red BGR
-
-        # Beak tip — extends forward from palm
-        beak_tip_x  = cx + int(radius * 2.2)
-        beak_tip_y  = cy - int(radius * 0.3)
-
-        # Beak base — two points behind tip
-        beak_base_y_gap = int(radius * 0.35)
-        beak_b1_x = cx + int(radius * 0.6)
-        beak_b1_y = beak_tip_y - beak_base_y_gap
-        beak_b2_x = cx + int(radius * 0.6)
-        beak_b2_y = beak_tip_y + beak_base_y_gap
-
-        beak_pts = np.array([
-            [beak_b1_x, beak_b1_y],
-            [beak_tip_x, beak_tip_y],
-            [beak_b2_x, beak_b2_y],
-        ], np.int32).reshape((-1,1,2))
-
-        # Filled beak
+        # Comb glow
         ov = frame.copy()
-        cv2.fillPoly(ov, [beak_pts], beak_color)
-        cv2.addWeighted(ov, 0.75,
-                        frame, 0.25, 0, frame)
-
-        # Sharp beak outline
-        cv2.polylines(frame, [beak_pts],
-                      True, beak_color, 1)
-
-        # Beak glow
-        ov = frame.copy()
-        cv2.fillPoly(ov, [beak_pts],
+        cv2.fillPoly(ov, [comb_pts],
                      (20, 100, 240))
         cv2.addWeighted(ov, 0.20,
                         frame, 0.80, 0, frame)
 
-        # Small bright eye dot above beak base
-        eye_x = beak_b1_x - int(radius*0.1)
-        eye_y = beak_b1_y - int(radius*0.2)
-        cv2.circle(frame, (eye_x, eye_y),
-                   3, (255,255,255), -1)
-        ov = frame.copy()
-        cv2.circle(ov, (eye_x, eye_y),
-                   7, beak_color, -1)
-        cv2.addWeighted(ov, 0.40,
-                        frame, 0.60, 0, frame)
+    # ── TAIL FEATHERS — fan left and down ────────────
+    tail_colors = [
+        (0,   70, 200),
+        (0,  110, 230),
+        (20, 160, 240),
+        (40, 190, 220),
+        (60, 210, 190),
+    ]
 
-        # ── Palm glow ────────────────────────────────
+    n_tail = 8
+    for i in range(n_tail):
+        t = i / (n_tail-1)
+        # Fan: 150 to 240 degrees (left/down side)
+        angle = math.radians(150 + t*90)
+        center_t = 1.0 - abs(t-0.5)*2
+        t_len = int(radius*(1.5 + center_t*1.0))
+
+        wave = math.sin(now*1.5+i*0.6)*0.05
+        angle += wave
+
+        tip_x = int(cx + math.cos(angle)*t_len)
+        tip_y = int(cy + math.sin(angle)*t_len)
+
+        ctrl_x = int(
+            cx + math.cos(angle)*t_len*0.5
+            + math.cos(angle+math.pi/2)*radius*0.25)
+        ctrl_y = int(
+            cy + math.sin(angle)*t_len*0.5
+            + math.sin(angle+math.pi/2)*radius*0.25)
+
+        f_pts = []
+        for s in range(18):
+            st = s/17
+            bx = int((1-st)**2*cx
+                     + 2*(1-st)*st*ctrl_x
+                     + st**2*tip_x)
+            by = int((1-st)**2*cy
+                     + 2*(1-st)*st*ctrl_y
+                     + st**2*tip_y)
+            f_pts.append((bx,by))
+
+        fc = tail_colors[
+            int(t*(len(tail_colors)-1))]
+        alpha = 0.55 + center_t*0.25
+
         ov = frame.copy()
-        cv2.circle(ov, (cx,cy),
-                   int(radius*0.85), color, -1)
-        cv2.addWeighted(ov, 0.22,
-                        frame, 0.78, 0, frame)
+        for j in range(1, len(f_pts)):
+            fade = 1.0 - j/len(f_pts)
+            fc_f = tuple(int(c*fade) for c in fc)
+            cv2.line(ov, f_pts[j-1], f_pts[j],
+                     fc_f, 2)
+        cv2.addWeighted(ov, alpha,
+                        frame, 1-alpha, 0, frame)
+
+        if center_t > 0.3:
+            cv2.circle(frame, (tip_x,tip_y),
+                       2, fc, -1)
+
+    # ── WATTLE — small red dewlap below beak ─────────
+    wattle_pts = np.array([
+        [cx + int(radius*0.35),
+         cy + int(radius*0.05)],
+        [cx + int(radius*0.25),
+         cy + int(radius*0.55)],
+        [cx + int(radius*0.55),
+         cy + int(radius*0.25)],
+    ], np.int32).reshape((-1,1,2))
+
+    ov = frame.copy()
+    cv2.fillPoly(ov, [wattle_pts], beak_color)
+    cv2.addWeighted(ov, 0.70,
+                    frame, 0.30, 0, frame)
 
 
 def draw_kartarimukha_lightning(frame, cx, cy,
@@ -1347,13 +1452,13 @@ MUDRA_THEMES = {
         'trail_color': (0,  130, 245),
     },
     'Trishula': {
-        'color':       (200, 60, 120),   # deep violet
-        'glow_color':  (180, 40, 100),
-        'p_color':     (210, 70, 130),
+        'color':       (30, 180, 220),   # gold
+        'glow_color':  (20, 150, 200),
+        'p_color':     (40, 190, 230),
         'geometry_fn': draw_trishula_flames,
         'p_behavior':  'none',
         'p_count':     0,
-        'trail_color': (190, 50, 110),
+        'trail_color': (25, 160, 210),
     },
     'Tamrachuda': {
         'color':       (0,  100, 220),   # fire red

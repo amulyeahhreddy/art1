@@ -10,12 +10,12 @@ class MudraRecognizer:
     # ─────────────────────────────────────────
 
     def __init__(self):
-        self.left_history   = deque(maxlen=10)
-        self.right_history  = deque(maxlen=10)
+        self.left_history   = deque(maxlen=14)
+        self.right_history  = deque(maxlen=14)
         self.left_confirmed  = None
         self.right_confirmed = None
         self.CONFIRM_THRESH  = 3
-        self.RELEASE_THRESH  = 2
+        self.RELEASE_THRESH  = 5
         self.display_scores_right = {}
         self.display_scores_left  = {}
         self.DISPLAY_ALPHA   = 0.15
@@ -181,6 +181,17 @@ class MudraRecognizer:
 
         # ── FIST GROUPS ───────────────────────────────
         if fb:
+            # Thumb tucked over fist = Mushti
+            thumb_over_fist = (fb and tt)
+            if thumb_over_fist:
+                groups.append('thumb_tucked_fist')
+
+            # Thumb pointing up from fist = Shikhara
+            thumb_up_fist = (fb and to and lm[4][1] < lm[2][1])
+            if thumb_up_fist:
+                groups.append('thumb_up_fist')
+
+            # Regular fist = Kapittha
             groups.append('fist')
 
         # ── PINCH GROUPS ──────────────────────────────
@@ -265,7 +276,9 @@ class MudraRecognizer:
         'three_up_tuck':          ['Trishula'],
         'pinky_only':             ['Chatura'],
         'drooping':               ['Sarpashirsha'],
-        'fist':                   ['Mushti', 'Shikhara', 'Kapittha'],
+        'thumb_tucked_fist': ['Mushti'],
+        'thumb_up_fist':     ['Shikhara', 'Tamrachuda'],
+        'fist':              ['Kapittha'],
         'pinch':                  ['Hamsasya', 'Sandamsha', 'Mukula',
                                    'Katakamukha', 'Chandrakala',
                                    'Kapittha'],
@@ -451,6 +464,10 @@ class MudraRecognizer:
         # CRITICAL: thumb tip must NOT be above thumb MCP
         # lm[4][1] < lm[2][1] means tip is higher = Shikhara
         if lm[4][1] < lm[2][1]: return 0.0
+        # If thumb tip is above thumb MCP it is Shikhara
+        if lm[4][1] < lm[2][1]: return 0.0
+        # If thumb is extended outward it is Shikhara
+        if self._thumb_out(lm, hs): return 0.0
         s = 0.60
         s += 0.25 if self._thumb_tucked(lm, hs) else 0.0
         if self._dist(lm[4], lm[5]) / hs < 0.28:
@@ -464,6 +481,10 @@ class MudraRecognizer:
         if not self._thumb_out(lm, hs): return 0.0
         # CRITICAL: thumb tip must be above thumb MCP
         if not lm[4][1] < lm[2][1]: return 0.0
+        # Must have thumb clearly above MCP
+        if not lm[4][1] < lm[2][1]: return 0.0
+        # Must have thumb extended not tucked
+        if self._thumb_tucked(lm, hs): return 0.0
         # Extra: thumb tip above wrist level too
         s = 0.45
         s += 0.30 if lm[4][1] < lm[2][1] else 0.0
@@ -1016,7 +1037,8 @@ class MudraRecognizer:
         # Don't let Unknown flush history quickly
         if raw == 'Unknown':
             unk_count = sum(1 for x in hist if x == 'Unknown')
-            if unk_count < 4 and hist:
+            # Require 6 consecutive Unknowns before releasing
+            if unk_count < 6 and hist:
                 raw = hist[-1]
 
         hist.append(raw)
