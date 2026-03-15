@@ -1,12 +1,15 @@
 import cv2
 import math
 import time
+import numpy as np
+import mediapipe as mp
 from hand_tracker import HandTracker
 from mudra_recognizer import MudraRecognizer
 from visual_effects import VisualEffects
 from visual_engine import VisualEngine
 from renderer import MudraRenderer
 from pose_tracker import PoseTracker
+from renderer import MUDRA_THEMES
 
 # Renderer handles visual effects for mudras
 DEFAULT_GLOW_COLOR = (180, 180, 180)
@@ -59,6 +62,18 @@ def main():
     pose_state = None
     prev_pose_state = None
     hand_speed = 0.0
+    # Face mesh for skeleton mode
+    mp_face = mp.solutions.face_mesh
+    face_mesh = mp_face.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=1,
+        refine_landmarks=False,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    face_results = None
+    # Visualization mode: 0=camera, 1=skeleton, 2=silhouette
+    viz_mode = 0
     
     # Debug mode and freeze frame state
     debug_mode = False
@@ -94,10 +109,17 @@ def main():
         
         # Flip frame horizontally for mirror view
         frame = cv2.flip(frame, 1)
+        # Store clean frame for skeleton/silhouette modes
+        clean_frame = frame.copy()
         
         # Run pose detection
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pose_results = pose_tracker.process(frame_rgb)
+        # Run face mesh in skeleton mode only (save CPU in other modes)
+        if viz_mode == 1:
+            face_results = face_mesh.process(frame_rgb)
+        else:
+            face_results = None
         prev_pose_state = pose_state
         pose_state = pose_tracker.get_pose_state(
             pose_results, frame.shape[1], frame.shape[0])
@@ -114,6 +136,137 @@ def main():
         
         # Draw landmarks on frame
         frame = hand_tracker.draw_landmarks(frame, results)
+        # Apply visualization mode
+        if viz_mode == 1:
+            # Skeleton mode — black background, glowing skeletons
+            frame = np.zeros_like(frame)
+            # Draw pose skeleton on black background
+            if pose_results and pose_results.pose_landmarks:
+                mudra_color = MUDRA_THEMES.get(mudra, {}).get('color', (100, 255, 180)) if mudra != 'Unknown' else (80, 80, 80)
+                connections = [
+                    ('left_shoulder', 'right_shoulder'),
+                    ('left_shoulder', 'left_elbow'),
+                    ('left_elbow', 'left_wrist'),
+                    ('right_shoulder', 'right_elbow'),
+                    ('right_elbow', 'right_wrist'),
+                    ('left_shoulder', 'left_hip'),
+                    ('right_shoulder', 'right_hip'),
+                    ('left_hip', 'right_hip'),
+                ]
+                key_idx = {
+                    'left_shoulder': 11, 'right_shoulder': 12,
+                    'left_elbow': 13, 'right_elbow': 14,
+                    'left_wrist': 15, 'right_wrist': 16,
+                    'left_hip': 23, 'right_hip': 24,
+                }
+                lm_pose = pose_results.pose_landmarks.landmark
+                h2, w2 = frame.shape[:2]
+                pts_pose = {name: (int(lm_pose[idx].x * w2), int(lm_pose[idx].y * h2))
+                            for name, idx in key_idx.items()}
+                for a, b in connections:
+                    if a in pts_pose and b in pts_pose:
+                        ov = frame.copy()
+                        cv2.line(ov, pts_pose[a], pts_pose[b], mudra_color, 4)
+                        cv2.addWeighted(ov, 0.55, frame, 0.45, 0, frame)
+                        cv2.line(frame, pts_pose[a], pts_pose[b], mudra_color, 1)
+                for name, pt in pts_pose.items():
+                    ov = frame.copy()
+                    cv2.circle(ov, pt, 6, mudra_color, -1)
+                    cv2.addWeighted(ov, 0.70, frame, 0.30, 0, frame)
+            # Draw hand skeleton on black background
+            if results.multi_hand_landmarks:
+                for hand_lm in results.multi_hand_landmarks:
+                    mudra_color = MUDRA_THEMES.get(mudra, {}).get('color', (100, 255, 180)) if mudra != 'Unknown' else (80, 80, 80)
+                    h2, w2 = frame.shape[:2]
+                    hand_connections = [
+                        (0,1),(1,2),(2,3),(3,4),
+                        (0,5),(5,6),(6,7),(7,8),
+                        (0,9),(9,10),(10,11),(11,12),
+                        (0,13),(13,14),(14,15),(15,16),
+                        (0,17),(17,18),(18,19),(19,20),
+                        (5,9),(9,13),(13,17),
+                    ]
+                    pts_hand = [(int(lm.x * w2), int(lm.y * h2))
+                                for lm in hand_lm.landmark]
+                    for a, b in hand_connections:
+                        ov = frame.copy()
+                        cv2.line(ov, pts_hand[a], pts_hand[b], mudra_color, 3)
+                        cv2.addWeighted(ov, 0.60, frame, 0.40, 0, frame)
+                        cv2.line(frame, pts_hand[a], pts_hand[b], mudra_color, 1)
+                    for pt in pts_hand:
+                        cv2.circle(frame, pt, 3, mudra_color, -1)
+            # Draw face as glowing constellation dots in skeleton mode
+            if face_results and face_results.multi_face_landmarks:
+                h2, w2 = frame.shape[:2]
+                face_lm = face_results.multi_face_landmarks[0].landmark
+                # Key sparse landmark indices — eyes, nose, lips, jaw, brows
+                sparse_idx = [
+                    # Jaw outline
+                    10, 338, 297, 332, 284, 251, 389, 356,
+                    454, 323, 361, 288, 397, 365, 379, 378,
+                    400, 377, 152, 148, 176, 149, 150, 136,
+                    172, 58, 132, 93, 234, 127, 162, 21,
+                    # Left eye
+                    33, 160, 158, 133, 153, 144,
+                    # Right eye
+                    362, 385, 387, 263, 373, 380,
+                    # Nose tip + bridge
+                    1, 2, 98, 327,
+                    # Lips
+                    61, 291, 0, 17, 269, 39,
+                    # Brows
+                    70, 63, 105, 66, 107,
+                    336, 296, 334, 293, 300,
+                ]
+                for idx in sparse_idx:
+                    lx = int(face_lm[idx].x * w2)
+                    ly = int(face_lm[idx].y * h2)
+                    # Outer glow
+                    ov = frame.copy()
+                    cv2.circle(ov, (lx, ly), 5, mudra_color, -1)
+                    cv2.addWeighted(ov, 0.20, frame, 0.80, 0, frame)
+                    # Mid glow
+                    ov2 = frame.copy()
+                    cv2.circle(ov2, (lx, ly), 3, mudra_color, -1)
+                    cv2.addWeighted(ov2, 0.45, frame, 0.55, 0, frame)
+                    # Bright core dot
+                    cv2.circle(frame, (lx, ly), 1,
+                               (255, 255, 255), -1)
+
+        elif viz_mode == 2:
+            # Silhouette mode — use pose landmarks to draw filled body shape
+            sil_frame = np.zeros_like(frame)
+            mudra_color = MUDRA_THEMES.get(mudra, {}).get('color', (100, 255, 180)) if mudra != 'Unknown' else (60, 60, 60)
+            if pose_results and pose_results.pose_landmarks:
+                h2, w2 = frame.shape[:2]
+                lm_pose = pose_results.pose_landmarks.landmark
+                # Key body points to form silhouette polygon
+                body_idx = [11, 12, 14, 16, 13, 15, 23, 24, 26, 28, 25, 27]
+                body_pts = [(int(lm_pose[i].x * w2), int(lm_pose[i].y * h2))
+                            for i in body_idx
+                            if lm_pose[i].visibility > 0.4]
+                if len(body_pts) >= 3:
+                    hull = cv2.convexHull(np.array(body_pts, np.int32))
+                    # Filled silhouette
+                    ov = sil_frame.copy()
+                    cv2.fillPoly(ov, [hull], mudra_color)
+                    cv2.addWeighted(ov, 0.75, sil_frame, 0.25, 0, sil_frame)
+                    # Glowing outline
+                    ov2 = sil_frame.copy()
+                    cv2.polylines(ov2, [hull], True, mudra_color, 8)
+                    cv2.addWeighted(ov2, 0.40, sil_frame, 0.60, 0, sil_frame)
+                    cv2.polylines(sil_frame, [hull], True, (255, 255, 255), 1)
+            # Add hand points to silhouette
+            if results.multi_hand_landmarks:
+                h2, w2 = frame.shape[:2]
+                for hand_lm in results.multi_hand_landmarks:
+                    hand_pts = [(int(lm.x * w2), int(lm.y * h2))
+                                for lm in hand_lm.landmark]
+                    hull_h = cv2.convexHull(np.array(hand_pts, np.int32))
+                    ov = sil_frame.copy()
+                    cv2.fillPoly(ov, [hull_h], mudra_color)
+                    cv2.addWeighted(ov, 0.80, sil_frame, 0.20, 0, sil_frame)
+            frame = sil_frame
         
         # Recognize mudras for each detected hand with proper handedness
         hand_data = []
@@ -263,7 +416,8 @@ def main():
                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
         
         # Display instructions
-        cv2.putText(frame, "Press 'q' or ESC to quit | Debug mode ON", (10, frame.shape[0] - 20),
+        modes = ['Camera', 'Skeleton', 'Silhouette']
+        cv2.putText(frame, f"Press 'q' to quit | 'm' = mode: {modes[viz_mode]}", (10, frame.shape[0] - 20),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # Display the frame
@@ -301,6 +455,10 @@ def main():
         elif key == ord('t') or key == ord('T'):  # Toggle Samyuktha Hastas
             mudra_recognizer.samyuktha_enabled = not mudra_recognizer.samyuktha_enabled
             print(f"Samyuktha Hastas: {'ON' if mudra_recognizer.samyuktha_enabled else 'OFF'}")
+        elif key == ord('m') or key == ord('M'):
+            viz_mode = (viz_mode + 1) % 3
+            modes = ['Camera', 'Skeleton', 'Silhouette']
+            print(f"Visualization mode: {modes[viz_mode]}")
     
     # Cleanup
     print("Cleaning up resources...")
