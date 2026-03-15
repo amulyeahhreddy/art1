@@ -123,12 +123,15 @@ def main():
         
         # Draw mudra visual effects using new renderer
         if hand_data:
+            second_lm = hand_data[1][0] \
+                        if len(hand_data) > 1 else None
             frame = renderer.render(
                 frame,
                 mudra,
                 score,
                 hand_data[0][0],
-                hand_data[0][1]
+                hand_data[0][1],
+                second_landmarks=second_lm
             )
         else:
             renderer.particles.update_draw(frame)

@@ -233,48 +233,220 @@ def draw_tripataka_flames(frame, cx, cy, radius,
     cv2.addWeighted(ov, 0.25, frame, 0.75, 0, frame)
 
 
-def draw_ardhapataka_pillars(frame, cx, cy, radius,
-                              color, now):
-    """Two sharp vertical pillars extending far upward.
-    Bright architectural lines with subtle fill between.
-    Clean cap connecting them at top. No curves."""
+def draw_ardhapataka_river(frame, cx, cy, radius,
+                            color, now,
+                            target_x=None,
+                            target_y=None):
+    """Ardhapataka: River flowing between two bank lines.
+    If target_x/y given: river flows toward that point
+    (second hand position).
+    If no target: river flows upward from palm center.
 
-    offset  = int(radius * 0.35)
-    pillar_h = int(radius * 3.5)
-    top_y    = cy - pillar_h
+    Two parallel bank lines define the river edges.
+    Multiple sine wave lines flow between the banks.
+    Water color: deep blue-teal with lighter wave crests."""
 
-    # Fill between pillars (subtle)
+    # ── Determine river direction ─────────────────────
+    if target_x is not None and target_y is not None:
+        # Direction from this hand toward other hand
+        dx = target_x - cx
+        dy = target_y - cy
+        river_length = math.sqrt(dx*dx + dy*dy)
+        if river_length < 1:
+            river_length = 1
+        # Unit vector along river
+        ux = dx / river_length
+        uy = dy / river_length
+    else:
+        # Default: flow upward
+        ux = 0.0
+        uy = -1.0
+        river_length = int(radius * 3.5)
+
+    # Perpendicular to river direction (bank direction)
+    px = -uy
+    py =  ux
+
+    # River width — scales with hand size
+    bank_gap = int(radius * 0.55)
+
+    # ── Draw river bank lines ─────────────────────────
+    # Left bank
+    left_start_x = int(cx + px * bank_gap)
+    left_start_y = int(cy + py * bank_gap)
+    left_end_x   = int(cx + px * bank_gap
+                       + ux * river_length)
+    left_end_y   = int(cy + py * bank_gap
+                       + uy * river_length)
+
+    # Right bank
+    right_start_x = int(cx - px * bank_gap)
+    right_start_y = int(cy - py * bank_gap)
+    right_end_x   = int(cx - px * bank_gap
+                        + ux * river_length)
+    right_end_y   = int(cy - py * bank_gap
+                        + uy * river_length)
+
+    # Draw bank lines — bright silver
+    bank_color = (235, 235, 255)
     ov = frame.copy()
-    cv2.rectangle(ov,
-        (cx - offset, top_y),
-        (cx + offset, cy),
-        color, -1)
-    cv2.addWeighted(ov, 0.12, frame, 0.88, 0, frame)
-
-    # Left pillar
-    ov = frame.copy()
-    cv2.line(ov, (cx-offset, cy),
-                 (cx-offset, top_y), color, 3)
+    cv2.line(ov,
+        (left_start_x,  left_start_y),
+        (left_end_x,    left_end_y),
+        bank_color, 3)
     cv2.addWeighted(ov, 0.80, frame, 0.20, 0, frame)
 
-    # Right pillar
     ov = frame.copy()
-    cv2.line(ov, (cx+offset, cy),
-                 (cx+offset, top_y), color, 3)
+    cv2.line(ov,
+        (right_start_x, right_start_y),
+        (right_end_x,   right_end_y),
+        bank_color, 3)
     cv2.addWeighted(ov, 0.80, frame, 0.20, 0, frame)
 
-    # Cap at top
-    ov = frame.copy()
-    cv2.line(ov, (cx-offset-8, top_y),
-                 (cx+offset+8, top_y), color, 3)
-    cv2.addWeighted(ov, 0.80, frame, 0.20, 0, frame)
-
-    # Glow along pillar edges
-    for x_off in [-(offset+4), (offset+4)]:
+    # Soft bank glow
+    for start, end in [
+        ((left_start_x,  left_start_y),
+         (left_end_x,    left_end_y)),
+        ((right_start_x, right_start_y),
+         (right_end_x,   right_end_y)),
+    ]:
         ov = frame.copy()
-        cv2.line(ov, (cx+x_off, cy),
-                     (cx+x_off, top_y), color, 6)
-        cv2.addWeighted(ov, 0.20, frame, 0.80, 0, frame)
+        cv2.line(ov, start, end, bank_color, 8)
+        cv2.addWeighted(ov, 0.15, frame, 0.85, 0, frame)
+
+    # ── Draw flowing water sine waves ────────────────
+    # Multiple sine wave lines between the banks
+    # Each wave offset in phase for flowing animation
+
+    n_waves    = 6      # number of wave lines
+    n_steps    = 80     # points per wave line
+    wave_amp   = bank_gap * 0.35  # wave height
+    wave_freq  = 2.5    # cycles along river length
+    flow_speed = 2.2    # animation speed
+
+    # Water colors — deep teal to bright cyan
+    wave_colors = [
+        (180, 120,  40),   # deep teal
+        (200, 150,  60),   # teal
+        (220, 180,  80),   # medium teal
+        (235, 200, 100),   # lighter teal
+        (245, 220, 130),   # pale teal
+        (255, 240, 160),   # near white-blue
+    ]
+
+    for w in range(n_waves):
+        # Position each wave evenly across river width
+        t_across = (w + 0.5) / n_waves  # 0.0 to 1.0
+        # Offset from right bank to left bank
+        offset_mult = -bank_gap + t_across * bank_gap * 2
+        phase_offset = w * 0.8  # stagger wave phases
+
+        pts = []
+        for s in range(n_steps):
+            # Position along river (0 to river_length)
+            t_along = s / (n_steps - 1)
+            dist_along = t_along * river_length
+
+            # Sine wave perpendicular to flow direction
+            sine_val = math.sin(
+                t_along * wave_freq * 2 * math.pi
+                - now * flow_speed
+                + phase_offset
+            ) * wave_amp
+
+            # Final point position
+            px_pos = int(
+                cx
+                + ux * dist_along        # along river
+                + px * offset_mult       # across river
+                + px * sine_val          # wave wobble
+            )
+            py_pos = int(
+                cy
+                + uy * dist_along
+                + py * offset_mult
+                + py * sine_val
+            )
+
+            # Clamp to frame bounds
+            h, fw = frame.shape[:2]
+            px_pos = max(0, min(fw-1, px_pos))
+            py_pos = max(0, min(h-1,  py_pos))
+            pts.append((px_pos, py_pos))
+
+        if len(pts) < 2:
+            continue
+
+        # Draw wave line with alpha
+        wave_c = wave_colors[w % len(wave_colors)]
+
+        # Fade alpha based on wave position
+        # Center waves brighter, edge waves more faint
+        center_dist = abs(t_across - 0.5) * 2  # 0=center
+        alpha = 0.65 - center_dist * 0.20
+
+        ov = frame.copy()
+        for i in range(1, len(pts)):
+            cv2.line(ov, pts[i-1], pts[i], wave_c, 1)
+        cv2.addWeighted(ov, alpha,
+                        frame, 1-alpha, 0, frame)
+
+    # ── Bright wave crests ────────────────────────────
+    # Highlight brightest points of top wave
+    crest_pts = []
+    for s in range(n_steps):
+        t_along = s / (n_steps - 1)
+        dist_along = t_along * river_length
+        sine_val = math.sin(
+            t_along * wave_freq * 2 * math.pi
+            - now * flow_speed
+        )
+        # Only draw crests (top of sine)
+        if sine_val > 0.75:
+            px_pos = int(cx + ux*dist_along
+                         + px * sine_val * wave_amp * 0.3)
+            py_pos = int(cy + uy*dist_along
+                         + py * sine_val * wave_amp * 0.3)
+            h, fw = frame.shape[:2]
+            if 0 <= px_pos < fw and 0 <= py_pos < h:
+                cv2.circle(frame, (px_pos, py_pos),
+                           2, (255,255,255), -1)
+
+    # ── Soft water fill between banks ────────────────
+    # Semi-transparent blue fill for water body
+    fill_pts = []
+    # Left bank points
+    for s in range(0, n_steps, 4):
+        t_along = s / (n_steps-1)
+        dist = t_along * river_length
+        fill_pts.append((
+            int(cx + ux*dist + px*bank_gap),
+            int(cy + uy*dist + py*bank_gap)
+        ))
+    # Right bank points (reversed)
+    for s in range(n_steps-1, 0, -4):
+        t_along = s / (n_steps-1)
+        dist = t_along * river_length
+        fill_pts.append((
+            int(cx + ux*dist - px*bank_gap),
+            int(cy + uy*dist - py*bank_gap)
+        ))
+
+    if len(fill_pts) > 3:
+        poly = np.array(fill_pts,
+                        np.int32).reshape((-1,1,2))
+        ov = frame.copy()
+        cv2.fillPoly(ov, [poly], (180, 100, 30))
+        cv2.addWeighted(ov, 0.18,
+                        frame, 0.82, 0, frame)
+
+    # ── Palm glow at river source ─────────────────────
+    ov = frame.copy()
+    cv2.circle(ov, (cx,cy),
+               int(radius*0.9), bank_color, -1)
+    cv2.addWeighted(ov, 0.20, frame, 0.80, 0, frame)
+    cv2.circle(frame, (cx,cy),
+               int(radius*0.35), bank_color, 2)
 
 
 def draw_ardhachandra_moon(frame, cx, cy, radius,
@@ -329,181 +501,193 @@ def draw_ardhachandra_moon(frame, cx, cy, radius,
 
 
 def draw_alapadma_lotus(frame, cx, cy, radius, color, now):
-    """Low-poly geometric lotus like the reference image.
-    Three distinct petal layers:
-    - Outer: wide flat pale white-pink petals spread low
-    - Middle: medium pink petals more upright
-    - Inner: deep magenta tight petals
-    - Center: bright orange-yellow stamen
-    Each petal made of triangular facets for low-poly look.
-    NO particles — geometry only."""
+    """Low-poly lotus matching reference image shape.
+    NOT a perfect circle — crown/flower shape where:
+    - Bottom outer petals spread wide and horizontal
+    - Upper petals rise more vertically
+    - 3 layers: outer white-pink, middle pink, inner magenta
+    - Orange-yellow center stamen
+    - Each petal made of triangular facets (low-poly)"""
 
     breathe = 1.0 + 0.04 * math.sin(now * 1.0)
 
-    def draw_faceted_petal(frame, cx, cy, angle,
-                           length, base_width,
+    def draw_faceted_petal(frame, cx, cy,
+                           angle, length, width,
                            tip_color, mid_color,
                            base_color, alpha):
-        """Low-poly petal made of 3 triangular facets.
-        Creates the faceted gem/low-poly look."""
-
+        """Single low-poly faceted petal."""
         perp = angle + math.pi/2
 
-        # Key points
         tip_x  = int(cx + math.cos(angle)*length)
         tip_y  = int(cy + math.sin(angle)*length)
-        base_x = int(cx + math.cos(angle)*length*0.05)
-        base_y = int(cy + math.sin(angle)*length*0.05)
+        base_x = int(cx + math.cos(angle)*length*0.06)
+        base_y = int(cy + math.sin(angle)*length*0.06)
 
-        # Side points at widest (45% from base)
-        w_dist = length * 0.40
+        w_dist = length * 0.42
         left_x  = int(cx + math.cos(angle)*w_dist
-                      + math.cos(perp)*base_width)
+                      + math.cos(perp)*width)
         left_y  = int(cy + math.sin(angle)*w_dist
-                      + math.sin(perp)*base_width)
+                      + math.sin(perp)*width)
         right_x = int(cx + math.cos(angle)*w_dist
-                      - math.cos(perp)*base_width)
+                      - math.cos(perp)*width)
         right_y = int(cy + math.sin(angle)*w_dist
-                      - math.sin(perp)*base_width)
+                      - math.sin(perp)*width)
 
-        # Mid ridge point (creates the facet split)
-        mid_x = int(cx + math.cos(angle)*length*0.62)
-        mid_y = int(cy + math.sin(angle)*length*0.62)
+        mid_x = int(cx + math.cos(angle)*length*0.60)
+        mid_y = int(cy + math.sin(angle)*length*0.60)
 
-        # FACET 1: Left triangle (base to left to mid)
-        f1 = np.array([
-            [base_x, base_y],
-            [left_x, left_y],
-            [mid_x,  mid_y],
-        ], np.int32).reshape((-1,1,2))
-        ov = frame.copy()
-        cv2.fillPoly(ov, [f1], mid_color)
-        cv2.addWeighted(ov, alpha, frame, 1-alpha, 0, frame)
-
-        # FACET 2: Right triangle (base to right to mid)
-        f2 = np.array([
-            [base_x,  base_y],
-            [right_x, right_y],
-            [mid_x,   mid_y],
-        ], np.int32).reshape((-1,1,2))
-        ov = frame.copy()
-        # Slightly lighter for right facet
-        lighter = tuple(min(255, c+30) for c in mid_color)
-        cv2.fillPoly(ov, [f2], lighter)
-        cv2.addWeighted(ov, alpha, frame, 1-alpha, 0, frame)
-
-        # FACET 3: Tip triangle (left to tip to right via mid)
-        f3 = np.array([
-            [left_x,  left_y],
-            [tip_x,   tip_y],
-            [mid_x,   mid_y],
-        ], np.int32).reshape((-1,1,2))
-        ov = frame.copy()
-        cv2.fillPoly(ov, [f3], tip_color)
-        cv2.addWeighted(ov, alpha, frame, 1-alpha, 0, frame)
-
-        f4 = np.array([
-            [right_x, right_y],
-            [tip_x,   tip_y],
-            [mid_x,   mid_y],
-        ], np.int32).reshape((-1,1,2))
-        ov = frame.copy()
-        lighter2 = tuple(min(255, c+20) for c in tip_color)
-        cv2.fillPoly(ov, [f4], lighter2)
-        cv2.addWeighted(ov, alpha, frame, 1-alpha, 0, frame)
-
-        # Thin facet lines for low-poly look
-        all_pts = [
-            (base_x, base_y), (left_x, left_y),
-            (mid_x, mid_y), (tip_x, tip_y),
-            (right_x, right_y)
+        # 4 triangular facets
+        facets = [
+            ([base_x,base_y],[left_x,left_y],
+             [mid_x,mid_y],   mid_color, 0),
+            ([base_x,base_y],[right_x,right_y],
+             [mid_x,mid_y],
+             tuple(min(255,c+25) for c in mid_color), 0),
+            ([left_x,left_y],[tip_x,tip_y],
+             [mid_x,mid_y],   tip_color, 0),
+            ([right_x,right_y],[tip_x,tip_y],
+             [mid_x,mid_y],
+             tuple(min(255,c+20) for c in tip_color), 0),
         ]
-        edges = [
-            (0,1),(1,2),(2,3),(3,4),(4,2),(2,0),(1,3),(4,0)
-        ]
-        for a_idx, b_idx in edges:
-            cv2.line(frame,
-                all_pts[a_idx], all_pts[b_idx],
-                (255,255,255), 1)
 
-    # ── LAYER 1: Outer petals ────────────────────────
-    # Wide, flat, pale white-pink spread outward
-    # BGR colors:
-    outer_tip  = (235, 220, 255)  # pale pink-white
-    outer_mid  = (210, 180, 240)  # soft pink
-    outer_base = (180, 140, 210)  # medium pink
+        for p1,p2,p3,fc,_ in facets:
+            pts = np.array([p1,p2,p3],
+                np.int32).reshape((-1,1,2))
+            ov = frame.copy()
+            cv2.fillPoly(ov, [pts], fc)
+            cv2.addWeighted(ov, alpha,
+                frame, 1-alpha, 0, frame)
 
-    n1 = 8
+        # Low-poly edge lines
+        all_pts = [(base_x,base_y),(left_x,left_y),
+                   (mid_x,mid_y),(tip_x,tip_y),
+                   (right_x,right_y)]
+        for a_i,b_i in [(0,1),(1,2),(2,3),(3,4),
+                         (4,2),(0,4),(1,3)]:
+            cv2.line(frame, all_pts[a_i], all_pts[b_i],
+                (200,200,200), 1)
+
+    # ══════════════════════════════════════════════
+    # PETAL ANGLE LAYOUT — crown/flower shape
+    # NOT evenly spaced circle
+    # Mimics reference: wide bottom, rising sides, top
+    # Angles in degrees, 0=right, 90=down, -90=up
+    # ══════════════════════════════════════════════
+
+    # OUTER LAYER — white to pale pink
+    # Wide flat petals, spread like a crown base
+    outer_angles_deg = [
+        -90,   # straight up — center top petal
+        -130,  # upper left
+        -50,   # upper right
+        180,   # straight left
+        0,     # straight right
+        130,   # lower left
+        50,    # lower right
+        -160,  # far upper left
+        -20,   # far upper right
+    ]
+    outer_tip  = (245, 235, 255)  # near white-pink
+    outer_mid  = (220, 195, 245)  # pale pink
+    outer_base = (190, 155, 225)  # soft pink
+
     l1 = int(radius * 2.8 * breathe)
-    w1 = int(radius * 0.52)
-    for i in range(n1):
-        angle = (2*math.pi/n1)*i + now*0.04
+    for i, deg in enumerate(outer_angles_deg):
+        angle = math.radians(deg)
+        # Horizontal petals wider, vertical petals narrower
+        # Petals near 0/180 degrees are wider (horizontal)
+        horiz_factor = abs(math.cos(angle))
+        w = int(radius * (0.35 + 0.22 * horiz_factor))
+        # Horizontal petals also longer
+        l = int(l1 * (0.85 + 0.20 * horiz_factor))
         draw_faceted_petal(frame, cx, cy, angle,
-                           l1, w1,
+                           l, w,
                            outer_tip, outer_mid,
-                           outer_base, 0.70)
+                           outer_base, 0.68)
 
-    # ── LAYER 2: Middle petals ───────────────────────
-    # Medium pink, slightly more upright
-    mid_tip  = (180, 100, 230)  # bright pink
-    mid_mid  = (150, 70,  210)  # deep pink
-    mid_base = (120, 50,  190)  # magenta
+    # MIDDLE LAYER — medium pink
+    # More upright petals, crown shape
+    mid_angles_deg = [
+        -90,   # top center
+        -115,  # upper left
+        -65,   # upper right
+        -145,  # far upper left
+        -35,   # far upper right
+        160,   # lower left
+        20,    # lower right
+        -170,  # far lower left
+        10,    # far lower right
+    ]
+    mid_tip  = (180, 100, 230)
+    mid_mid  = (150,  65, 205)
+    mid_base = (120,  45, 180)
 
-    n2 = 8
-    l2 = int(radius * 1.9 * breathe)
-    w2 = int(radius * 0.38)
-    for i in range(n2):
-        angle = (2*math.pi/n2)*i + \
-                (math.pi/n2) + now*0.04
+    l2 = int(radius * 1.95 * breathe)
+    for deg in mid_angles_deg:
+        angle = math.radians(deg)
+        horiz_factor = abs(math.cos(angle))
+        w = int(radius * (0.28 + 0.14 * horiz_factor))
         draw_faceted_petal(frame, cx, cy, angle,
-                           l2, w2,
+                           l2, w,
                            mid_tip, mid_mid,
                            mid_base, 0.75)
 
-    # ── LAYER 3: Inner petals ────────────────────────
-    # Deep magenta, tight and tall
-    inner_tip  = (140, 60,  200)  # bright magenta
-    inner_mid  = (100, 30,  170)  # deep magenta
-    inner_base = ( 80, 20,  150)  # dark magenta
+    # INNER LAYER — deep magenta, tight upright petals
+    inner_angles_deg = [
+        -90,   # top
+        -112,  # left of top
+        -68,   # right of top
+        -135,  # left
+        -45,   # right
+        160,   # lower left
+        20,    # lower right
+    ]
+    inner_tip  = (150,  55, 210)
+    inner_mid  = (110,  25, 175)
+    inner_base = ( 85,  15, 150)
 
-    n3 = 6
-    l3 = int(radius * 1.2 * breathe)
-    w3 = int(radius * 0.26)
-    for i in range(n3):
-        angle = (2*math.pi/n3)*i + now*0.04
+    l3 = int(radius * 1.25 * breathe)
+    for deg in inner_angles_deg:
+        angle = math.radians(deg)
+        horiz_factor = abs(math.cos(angle))
+        w = int(radius * (0.20 + 0.08 * horiz_factor))
         draw_faceted_petal(frame, cx, cy, angle,
-                           l3, w3,
+                           l3, w,
                            inner_tip, inner_mid,
-                           inner_base, 0.80)
+                           inner_base, 0.82)
 
-    # ── CENTER: Orange-yellow stamen ─────────────────
-    # Like the reference — bright warm orange center
-
-    # Outer stamen ring — orange
+    # ── ORANGE-YELLOW STAMEN CENTER ──────────────────
+    # Outer orange ring
     ov = frame.copy()
     cv2.circle(ov, (cx,cy),
-               int(radius*0.45), (0, 160, 255), -1)
-    cv2.addWeighted(ov, 0.85, frame, 0.15, 0, frame)
+               int(radius*0.44), (0,150,245), -1)
+    cv2.addWeighted(ov, 0.88, frame, 0.12, 0, frame)
 
-    # Inner stamen — bright yellow
+    # Facet lines on stamen
+    for i in range(6):
+        angle = (2*math.pi/6)*i
+        sx = int(cx + math.cos(angle)*radius*0.40)
+        sy = int(cy + math.sin(angle)*radius*0.40)
+        cv2.line(frame,(cx,cy),(sx,sy),
+                 (0,200,255),1)
+
+    # Inner yellow
     ov = frame.copy()
-    cv2.circle(ov, (cx,cy),
-               int(radius*0.28), (0, 220, 255), -1)
-    cv2.addWeighted(ov, 0.90, frame, 0.10, 0, frame)
-
-    # Stamen facet lines
-    for i in range(8):
-        angle = (2*math.pi/8)*i
-        sx = int(cx + math.cos(angle)*radius*0.42)
-        sy = int(cy + math.sin(angle)*radius*0.42)
-        cv2.line(frame, (cx,cy), (sx,sy),
-                 (0,255,255), 1)
+    cv2.circle(ov,(cx,cy),
+               int(radius*0.26),(0,220,255),-1)
+    cv2.addWeighted(ov,0.92,frame,0.08,0,frame)
 
     # Bright white hot center
     ov = frame.copy()
-    cv2.circle(ov, (cx,cy),
-               int(radius*0.12), (255,255,255), -1)
-    cv2.addWeighted(ov, 0.95, frame, 0.05, 0, frame)
+    cv2.circle(ov,(cx,cy),
+               int(radius*0.11),(255,255,255),-1)
+    cv2.addWeighted(ov,0.95,frame,0.05,0,frame)
+
+    # Soft outer bloom glow
+    ov = frame.copy()
+    cv2.circle(ov,(cx,cy),
+               int(radius*3.2),(190,140,255),-1)
+    cv2.addWeighted(ov,0.07,frame,0.93,0,frame)
 
 
 # ─────────────────────────────────────────────────────
@@ -530,10 +714,10 @@ MUDRA_THEMES = {
         'trail_color': (30, 120, 245),
     },
     'Ardhapataka': {
-        'color':       (235, 235, 255),  # bright cool silver
+        'color':       (235, 235, 255),
         'glow_color':  (220, 220, 245),
         'p_color':     (240, 240, 255),
-        'geometry_fn': draw_ardhapataka_pillars,
+        'geometry_fn': draw_ardhapataka_river,
         'p_behavior':  'drift_up',
         'p_count':     2,
         'trail_color': (220, 220, 240),
@@ -570,6 +754,7 @@ class MudraRenderer:
         self.particles  = ParticleSystem(max_particles=200)
         self.trail      = TrailSystem(maxlen=30)
         self.frame_count = 0
+        self.second_hand_pos = None
 
     def _palm_center(self, landmarks):
         cx = int(landmarks[9][0] * self.w)
@@ -581,8 +766,9 @@ class MudraRenderer:
         dy = (landmarks[9][1]-landmarks[0][1]) * self.h
         return max(int(math.sqrt(dx*dx+dy*dy)), 25)
 
-    def render(self, frame, mudra, score, landmarks,
-               handedness='Right'):
+    def render(self, frame, mudra, score,
+               landmarks, handedness='Right',
+               second_landmarks=None):
         if not landmarks:
             self.particles.update_draw(frame)
             return frame
@@ -592,6 +778,14 @@ class MudraRenderer:
 
         cx, cy  = self._palm_center(landmarks)
         radius  = self._hand_radius(landmarks)
+
+        # Track second hand position for river effect
+        if second_landmarks:
+            s_cx = int(second_landmarks[9][0] * self.w)
+            s_cy = int(second_landmarks[9][1] * self.h)
+            self.second_hand_pos = (s_cx, s_cy)
+        else:
+            self.second_hand_pos = None
 
         # Always update trail
         self.trail.update(cx, cy)
@@ -622,7 +816,15 @@ class MudraRenderer:
         draw_glow(frame, cx, cy, radius, g_color)
 
         # LAYER 3 — Geometry
-        geo_fn(frame, cx, cy, radius, color, now)
+        # Special case: Ardhapataka needs second hand pos
+        if mudra == 'Ardhapataka' and \
+                hasattr(self, 'second_hand_pos') and \
+                self.second_hand_pos is not None:
+            tx, ty = self.second_hand_pos
+            geo_fn(frame, cx, cy, radius,
+                   color, now, tx, ty)
+        else:
+            geo_fn(frame, cx, cy, radius, color, now)
 
         # LAYER 4 — Particles (every other frame)
         if self.frame_count % 2 == 0 and \
