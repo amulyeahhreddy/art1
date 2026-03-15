@@ -1,9 +1,16 @@
 import cv2
+import math
 import time
 from hand_tracker import HandTracker
 from mudra_recognizer import MudraRecognizer
 from visual_effects import VisualEffects
 from visual_engine import VisualEngine
+from renderer import MudraRenderer
+
+# Renderer handles visual effects for mudras
+DEFAULT_GLOW_COLOR = (180, 180, 180)
+
+
 
 
 def main():
@@ -46,6 +53,7 @@ def main():
     mudra_recognizer = MudraRecognizer()
     visual_effects = VisualEffects()
     engine = VisualEngine(width=640, height=480)
+    renderer = MudraRenderer(width=640, height=480)
     
     # Debug mode and freeze frame state
     debug_mode = False
@@ -112,6 +120,18 @@ def main():
                     hand_data[0][0], hand_data[0][1])
         else:  # 2 hands
             mudra, score = mudra_recognizer.recognize_two_hand(hand_data[0], hand_data[1])
+        
+        # Draw mudra visual effects using new renderer
+        if hand_data:
+            frame = renderer.render(
+                frame,
+                mudra,
+                score,
+                hand_data[0][0],
+                hand_data[0][1]
+            )
+        else:
+            renderer.particles.update_draw(frame)
         
         # ── Visual Engine ──────────────────────────────
         # VISUALS TEMPORARILY DISABLED — re-enable after detection fixed
