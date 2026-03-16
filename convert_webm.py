@@ -1,4 +1,4 @@
-from moviepy import AudioFileClip
+from moviepy.editor import AudioFileClip
 
 def convert_webm_to_wav(input_file, output_file):
     print(f"Converting {input_file} → {output_file}...")

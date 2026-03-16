@@ -130,23 +130,6 @@ def main():
         # Flip frame horizontally for mirror view
         frame = cv2.flip(frame, 1)
 
-        # Blend mandala into background BEFORE drawing anything on frame
-        if viz_mode == 0 and mandala_visible and mandala_alpha > 0:
-            mandala_layer = np.zeros_like(frame)
-            # Scale the mandala renderer radius by mandala_scale
-            orig_w = mandala.w
-            orig_h = mandala.h
-            mandala.w = int(640 * mandala_scale)
-            mandala.h = int(480 * mandala_scale)
-            mandala.render(mandala_layer)
-            mandala.w = orig_w
-            mandala.h = orig_h
-            cv2.addWeighted(mandala_layer, mandala_alpha,
-                            frame, 1.0 - mandala_alpha, 0, frame)
-        # Update mandala every frame
-        # Normalize hand speed to 0-1 for breathing
-        movement_energy = min(hand_speed / 25.0, 1.0)
-        mandala.update(movement_energy=movement_energy)
         # Store clean frame for skeleton/silhouette modes
         clean_frame = frame.copy()
         
@@ -348,6 +331,24 @@ def main():
 
             frame = sil_frame
         
+        # Blend mandala into background AFTER skeleton/silhouette has been drawn
+        if mandala_visible and mandala_alpha > 0:
+            mandala_layer = np.zeros_like(frame)
+            # Scale the mandala renderer radius by mandala_scale
+            orig_w = mandala.w
+            orig_h = mandala.h
+            mandala.w = int(640 * mandala_scale)
+            mandala.h = int(480 * mandala_scale)
+            mandala.render(mandala_layer)
+            mandala.w = orig_w
+            mandala.h = orig_h
+            cv2.addWeighted(mandala_layer, mandala_alpha,
+                            frame, 1.0 - mandala_alpha, 0, frame)
+        # Update mandala every frame
+        # Normalize hand speed to 0-1 for breathing
+        movement_energy = min(hand_speed / 25.0, 1.0)
+        mandala.update(movement_energy=movement_energy)
+        
         # Recognize mudras for each detected hand with proper handedness
         hand_data = []
         if results.multi_hand_landmarks:
@@ -412,11 +413,14 @@ def main():
         if not production_mode:
             if mudra != "Unknown":
                 label = f"{mudra}  {int(score*100)}%"
-                cv2.putText(frame, label, (20, 60),
-                            cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,255,180), 2)
-            else:
-                cv2.putText(frame, "Unknown", (20, 60),
-                            cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,0,255), 2)
+                # Draw text on a separate overlay at top of frame only
+                text_overlay = frame.copy()
+                cv2.putText(text_overlay, label, (20, 50),
+                            cv2.FONT_HERSHEY_DUPLEX, 1.2, (0,255,180), 2)
+                # Only blend the top strip of the frame
+                frame[0:80, :] = cv2.addWeighted(
+                    text_overlay[0:80, :], 0.75,
+                    frame[0:80, :], 0.25, 0)
             
             # Draw visual effects for detected mudras
             if len(hand_data) == 1:  # Only draw effects for single hand
