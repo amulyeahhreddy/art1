@@ -11,6 +11,7 @@ from mandala_renderer import MandalaRenderer
 from renderer import MudraRenderer
 from pose_tracker import PoseTracker
 from renderer import MUDRA_THEMES
+from audio_manager import AudioManager
 
 # Renderer handles visual effects for mudras
 DEFAULT_GLOW_COLOR = (180, 180, 180)
@@ -71,6 +72,13 @@ def main():
     mandala_alpha     = 0.0
     mandala_scale     = 0.8   # starts small, grows while spinning
     mandala_expanding = False
+    
+    # Initialize audio manager
+    audio_manager = AudioManager()
+    # Start playing background music (using loud test for debugging)
+    # To use your downloaded music, replace "loud_test.wav" with:
+    # "Carnatic Music ｜ Jayanthi Kumaresh ｜ Raga Kapi - Thillana (Pt. 2) ｜ Music of India [4yv4ea1pFp4].webm"
+    audio_manager.load_and_play("carnatic.wav", loop=True)
     # Face mesh for skeleton mode
     mp_face = mp.solutions.face_mesh
     face_mesh = mp_face.FaceMesh(
@@ -85,6 +93,7 @@ def main():
     face_results = None
     # Visualization mode: 0=camera, 1=skeleton, 2=silhouette
     viz_mode = 0
+    production_mode = False  # toggle with 'p' key
     
     # Debug mode and freeze frame state
     debug_mode = False
@@ -400,13 +409,14 @@ def main():
         # ── End Visual Engine ───────────────────────────
             
         # Display mudra name and confidence
-        if mudra != "Unknown":
-            label = f"{mudra}  {int(score*100)}%"
-            cv2.putText(frame, label, (20, 60),
-                        cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,255,180), 2)
-        else:
-            cv2.putText(frame, "Unknown", (20, 60),
-                        cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,0,255), 2)
+        if not production_mode:
+            if mudra != "Unknown":
+                label = f"{mudra}  {int(score*100)}%"
+                cv2.putText(frame, label, (20, 60),
+                            cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,255,180), 2)
+            else:
+                cv2.putText(frame, "Unknown", (20, 60),
+                            cv2.FONT_HERSHEY_DUPLEX, 1.5, (0,0,255), 2)
             
             # Draw visual effects for detected mudras
             if len(hand_data) == 1:  # Only draw effects for single hand
@@ -482,22 +492,32 @@ def main():
             fps_start_time = time.time()
         
         # Display FPS
-        fps_text = f"FPS: {current_fps:.1f}"
-        cv2.putText(frame, fps_text, (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        if not production_mode:
+            fps_text = f"FPS: {current_fps:.1f}"
+            cv2.putText(frame, fps_text, (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         # Display supported mudras
-        mudras_text = "30+ Mudras: Pataka, Tripataka, Ardhapataka, Kartarimukha, Mayura, Ardhachandra, Arala, Shukatunda, Mushti, Shikhara, Kapitta, Katakamukha, Suchi, Chandrakala, Padmakosha, Sarpashirsha, Mrigashirsha, Simhamukha, Kangula, Alapadma, Chatura, Bhramara, Hamsasya, Hamsapaksha, Sandamsha, Mukula, Tamrachuda, Trishula"
-        cv2.putText(frame, mudras_text[:120] + "...", (10, frame.shape[0] - 60),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+        if not production_mode:
+            mudras_text = "30+ Mudras: Pataka, Tripataka, Ardhapataka, Kartarimukha, Mayura, Ardhachandra, Arala, Shukatunda, Mushti, Shikhara, Kapitta, Katakamukha, Suchi, Chandrakala, Padmakosha, Sarpashirsha, Mrigashirsha, Simhamukha, Kangula, Alapadma, Chatura, Bhramara, Hamsasya, Hamsapaksha, Sandamsha, Mukula, Tamrachuda, Trishula"
+            cv2.putText(frame, mudras_text[:120] + "...", (10, frame.shape[0] - 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
         
         # Display instructions
         modes = ['Camera', 'Skeleton', 'Silhouette']
-        cv2.putText(frame, f"Press 'q' to quit | 'm' = mode: {modes[viz_mode]}", (10, frame.shape[0] - 20),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        if not production_mode:
+            cv2.putText(frame, f"Press 'q' to quit | 'm' = mode: {modes[viz_mode]} | 'a' = audio toggle | 'v/b' = volume | 'u' = mute", (10, frame.shape[0] - 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         
         # Display the frame
-        cv2.imshow('Indian Classical Mudra Detection', frame)
+        if production_mode:
+            cv2.namedWindow('Mudra', cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty('Mudra',
+                                  cv2.WND_PROP_FULLSCREEN,
+                                  cv2.WINDOW_FULLSCREEN)
+            cv2.imshow('Mudra', frame)
+        else:
+            cv2.imshow('Indian Classical Mudra Detection', frame)
         
         # Check for quit keys
         key = cv2.waitKey(1) & 0xFF
@@ -535,10 +555,32 @@ def main():
             viz_mode = (viz_mode + 1) % 3
             modes = ['Camera', 'Skeleton', 'Silhouette']
             print(f"Visualization mode: {modes[viz_mode]}")
+        elif key == ord('p') or key == ord('P'):
+            production_mode = not production_mode
+            if not production_mode:
+                cv2.destroyWindow('Mudra')
+            print(f"Production mode: {'ON' if production_mode else 'OFF'}")
+        elif key == ord('a') or key == ord('A'):  # Toggle audio
+            if audio_manager.is_playing:
+                audio_manager.pause()
+            else:
+                audio_manager.resume()
+        elif key == ord('v') or key == ord('V'):  # Volume up
+            current_vol = audio_manager.volume
+            audio_manager.set_volume(min(1.0, current_vol + 0.1))
+        elif key == ord('b') or key == ord('B'):  # Volume down  
+            current_vol = audio_manager.volume
+            audio_manager.set_volume(max(0.0, current_vol - 0.1))
+        elif key == ord('u') or key == ord('U'):  # Mute/Unmute
+            audio_manager.toggle_mute()
     
     # Cleanup
     print("Cleaning up resources...")
     engine.clear()
+    
+    # Cleanup audio
+    audio_manager.cleanup()
+    print("Audio stopped and cleaned up")
     
     # Release camera
     if cap is not None and cap.isOpened():
